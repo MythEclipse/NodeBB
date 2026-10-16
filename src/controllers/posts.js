@@ -13,6 +13,18 @@ const helpers = require('./helpers');
 
 const postsController = module.exports;
 
+/**
+ * Route a request for a single post to that post's canonical path.
+ *
+ * Requests are handed off to the next middleware (`next()`) whenever the
+ * target is missing or unreadable, so that normal routing/404 handling takes
+ * over instead of redirecting.
+ *
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ * @param {import('express').NextFunction} next
+ * @returns {Promise<void>}
+ */
 postsController.redirectToPost = async function (req, res, next) {
 	const pid = utils.isNumber(req.params.pid) ? parseInt(req.params.pid, 10) : req.params.pid;
 	if (!pid) {
@@ -48,6 +60,13 @@ postsController.redirectToPost = async function (req, res, next) {
 	helpers.redirect(res, qs ? `${path}?${qs}` : path, true);
 };
 
+/**
+ * Return a page of the most recent posts as JSON, optionally filtered by term.
+ *
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ * @returns {Promise<void>}
+ */
 postsController.getRecentPosts = async function (req, res) {
 	const page = parseInt(req.query.page, 10) || 1;
 	const postsPerPage = 20;
