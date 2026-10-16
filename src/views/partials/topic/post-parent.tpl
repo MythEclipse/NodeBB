@@ -2,7 +2,7 @@
 	<div class="d-flex gap-2 text-nowrap">
 		<div class="d-flex flex-nowrap gap-1 align-items-center">
 			<a href="{config.relative_path}/user/{./parent.user.userslug}" class="text-decoration-none lh-1">{{buildAvatar(./parent.user, "16px", true, "not-responsive align-middle")}}</a>
-			<a class="fw-semibold text-truncate" style="max-width: 150px;" href="{config.relative_path}/user/{./parent.user.userslug}">{{renderShortcodeEmoji(txDisplayname(./parent.user), ./parent.user.fullnameEmoji)}}</a>
+			<a class="fw-semibold text-truncate" style="max-width: 150px;" href="{config.relative_path}/user/{./parent.user.userslug}">{{renderShortcodeEmoji(txDisplayname(./parent.user), ./parent.user.fullnameEmoji)}}</a>{{{ if ./parent.user.imrnesRank }}}<span class="imrnes-rank imrnes-rank-xs ir-{./parent.user.imrnesRankIdx}" title="{./parent.user.imrnesTip}">{./parent.user.imrnesRank}</span>{{{ end }}}
 		</div>
 
 		<a href="{config.relative_path}/post/{encodeURIComponent(./parent.pid)}" class="text-muted timeago text-nowrap hidden" title="{./parent.timestampISO}"></a>
