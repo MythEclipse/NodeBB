@@ -36,7 +36,7 @@ module.exports = function (middleware) {
 			isGmod,
 			isPrivileged,
 			// `req.params.uid` is a string, while `req.uid` is a number
-			isSelf: req.params.uid ? req.params.uid === String(req.uid) : false,
+			isSelf: req.params.uid ? String(req.params.uid) === String(req.uid) : false,
 		};
 		next();
 	};
