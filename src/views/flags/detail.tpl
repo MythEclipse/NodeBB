@@ -27,7 +27,7 @@
 					<li class="{{{ if target.user.banned }}}hidden{{{ end }}}"><a class="dropdown-item rounded-1" href="#" data-action="ban" role="menuitem">{{tx("user:ban-account")}}</a></li>
 					<li class="{{{ if !target.user.banned }}}hidden{{{ end }}}"><a class="dropdown-item rounded-1" href="#" data-action="unban" role="menuitem">{{tx("user:unban-account")}}</a></li>
 					{{{ end }}}
-					{{{ if privileges.mute}}}
+					{{{ if privileges.mute }}}
 					<li class="{{{ if target.user.muted }}}hidden{{{ end }}}"><a class="dropdown-item rounded-1" href="#" data-action="mute" role="menuitem">{{tx("user:mute-account")}}</a></li>
 					<li class="{{{ if !target.user.muted }}}hidden{{{ end }}}"><a class="dropdown-item rounded-1" href="#" data-action="unmute" role="menuitem">{{tx("user:unmute-account")}}</a></li>
 					{{{ end }}}
@@ -46,7 +46,7 @@
 			</a>
 
 			{{{ if type_bool.post }}}
-			{{{ if !target.deleted}}}
+			{{{ if !target.deleted }}}
 			<a class="d-flex gap-2 align-items-center btn btn-sm btn-outline-danger border border-secondary-subtle text-start" href="#" data-action="delete-post"><i class="fa fa-fw fa-trash"></i> {{tx("flags:delete-post")}}</a>
 			{{{ else }}}
 			<a class="d-flex gap-2 align-items-center btn btn-sm btn-danger border border-secondary-subtle text-start" href="#" data-action="purge-post"><i class="fa fa-fw fa-trash"></i> {{tx("flags:purge-post")}}</a>
@@ -73,9 +73,9 @@
 				<label class="text-muted fw-semibold" for="assignee">{{tx("flags:assignee")}}</label>
 				<select class="form-control form-control-sm" id="assignee" name="assignee" disabled>
 					<option value="">{{tx("flags:no-assignee")}}</option>
-					{{{each assignees}}}
+					{{{ each assignees }}}
 					<option value="{../uid}">{../username}</option>
-					{{{end}}}
+					{{{ end }}}
 				</select>
 			</div>
 			<div class="d-grid">
@@ -130,8 +130,8 @@
 
 				{{{ if type_bool.user }}}
 				<div class="d-flex gap-2 align-items-center lh-1 mb-2">
-					<a href="{config.relative_path}/user/{./target.userslug}">{{buildAvatar(target, "16px", true)}}</a>
-					<a href="{config.relative_path}/user/{./target.userslug}">{target.username}</a>
+					<a href="{config.relative_path}/user/{target.userslug}">{{buildAvatar(target, "16px", true)}}</a>
+					<a href="{config.relative_path}/user/{target.userslug}">{target.username}</a>
 				</div>
 				<blockquote>{{{ if target.aboutme }}}{target.aboutme}{{{ else }}}<em>{{tx("flags:target-aboutme-empty")}}</em>{{{ end }}}</blockquote>
 				{{{ end }}}
@@ -149,7 +149,7 @@
 				<div class="alert alert-warning" role="alert">{{tx("flags:target-purged")}}</div>
 				{{{ end }}}
 			</div>
-			<div class="flag/reports" class="pb-4 border-bottom">
+			<div class="flag/reports">
 				<h2 class="h6 fw-bold">{{tx("flags:reports")}}</h2>
 				<ul class="list-unstyled mt-4">
 					{{{ each reports }}}
@@ -179,7 +179,7 @@
 							<a href="{config.relative_path}/user/{./user.userslug}">{{buildAvatar(./user, "16px", true)}}</a>
 							<a href="{config.relative_path}/user/{./user.userslug}">{./user.username}</a>
 							<span class="timeago text-muted" title="{./datetimeISO}"></span>
-							<div class=" ms-auto flex-shrink-0">
+							<div class="ms-auto flex-shrink-0">
 								<a href="#" class="btn btn-sm btn-link" data-action="addEditNote"><i class="fa fa-pencil"></i></a>
 								<a href="#" class="btn btn-sm btn-link" data-action="delete-note"><i class="fa fa-trash text-danger"></i></a>
 							</div>
