@@ -28,23 +28,41 @@ const backfillCache = ttlCache({
 	ttl: 1000 * 60 * 2, // 2 minutes
 });
 
+/**
+ * Normalizes an ActivityStreams property that may be a single value or an array.
+ * ActivityStreams allows properties such as `tag` to be either form, so callers
+ * cannot rely on `Array.isArray` alone.
+ *
+ * @param {*} value - Value to normalize
+ * @returns {Array} `value` if it is already an array, `[]` if it is falsy, otherwise `[value]`
+ */
+function asArray(value) {
+	if (Array.isArray(value)) {
+		return value;
+	}
+	return value ? [value] : [];
+}
+
+/**
+ * Extracts hashtag names from an ActivityStreams `tag` property.
+ *
+ * @param {Array|Object|string} tag - ActivityStreams tag(s)
+ * @param {number} cid - Category id, used to look up the maximum number of tags
+ * @returns {Promise<string[]>} Hashtag names, without the leading `#`
+ */
 Notes._normalizeTags = async (tag, cid) => {
 	const systemTags = (meta.config.systemTags || '').split(',');
 	const maxTags = await categories.getCategoryField(cid, 'maxTags');
-	let tags = tag || [];
-
-	if (!Array.isArray(tags)) { // the "|| []" should handle null/undefined values... #famouslastwords
-		tags = [tags];
-	}
+	let tags = asArray(tag);
 
 	tags = tags
 		.filter(({ type }) => type === 'Hashtag')
-		.map((tag) => {
-			tag.name = tag.name.startsWith('#') ? tag.name.slice(1) : tag.name;
-			return tag;
+		.map((hashtag) => {
+			hashtag.name = hashtag.name.startsWith('#') ? hashtag.name.slice(1) : hashtag.name;
+			return hashtag;
 		})
 		.filter(({ name }) => !systemTags.includes(name))
-		.map(t => t.name);
+		.map(hashtag => hashtag.name);
 
 	if (tags.length > maxTags) {
 		tags.length = maxTags;
@@ -223,23 +241,19 @@ Notes.assert = async (uid, input, options = { skipChecks: false, queue: false })
 
 			// Extract emoji metadata for title rendering
 			const titleEmoji = [];
-			const rawTags = _activitypub.tag;
-			const tagList = Array.isArray(rawTags) ? rawTags : (rawTags ? [rawTags] : []);
-			const emojiTags = tagList.filter(tag => tag?.type === 'Emoji');
-			for (const tag of emojiTags) {
-				const { name, icon } = tag;
+			const emojiTags = asArray(_activitypub.tag).filter(tag => tag?.type === 'Emoji');
+			for (const { name, icon } of emojiTags) {
 				if (!name || !icon?.url) continue;
 				let code = name;
 				if (!code.startsWith(':')) code = `:${code}`;
 				if (!code.endsWith(':')) code = `${code}:`;
-				if (title.includes(code)) {
-					try {
-						const { hostname } = new URL(icon.url);
-						const clean = code.replace(/^:+|:+$/g, '');
-						titleEmoji.push({ code, hostname, clean });
-					} catch {
-						// skip invalid icon URLs
-					}
+				if (!title.includes(code)) continue;
+				try {
+					const { hostname } = new URL(icon.url);
+					const clean = code.replace(/^:+|:+$/g, '');
+					titleEmoji.push({ code, hostname, clean });
+				} catch {
+					// skip invalid icon URLs
 				}
 			}
 			if (titleEmoji.length) {
@@ -255,10 +269,7 @@ Notes.assert = async (uid, input, options = { skipChecks: false, queue: false })
 			options.skipChecks || options.cid ||
 			await assertRelation(chain[inputIndex !== -1 ? inputIndex : 0]);
 		if (!hasRelation) {
-			if (!hasRelation) {
-				activitypub.helpers.log(`[activitypub/notes.assert] Not asserting ${id} as it has no relation to existing tracked content.`);
-			}
-
+			activitypub.helpers.log(`[activitypub/notes.assert] Not asserting ${id} as it has no relation to existing tracked content.`);
 			return null;
 		}
 
