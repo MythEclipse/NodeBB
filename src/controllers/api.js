@@ -12,23 +12,35 @@ const utils = require('../utils');
 
 const apiController = module.exports;
 
-const url = nconf.get('url');
-const relative_path = nconf.get('relative_path');
-const upload_url = nconf.get('upload_url');
-const asset_base_url = nconf.get('asset_base_url');
+const forumUrl = nconf.get('url');
+const relativePath = nconf.get('relative_path');
+const uploadUrl = nconf.get('upload_url');
+const assetBaseUrl = nconf.get('asset_base_url');
 const socketioTransports = nconf.get('socket.io:transports') || ['polling', 'websocket'];
 const socketioOrigins = nconf.get('socket.io:origins');
 const websocketAddress = nconf.get('socket.io:address') || '';
-const fontawesome_pro = nconf.get('fontawesome:pro') || false;
-const fontawesome_styles = utils.getFontawesomeStyles();
-const fontawesome_version = utils.getFontawesomeVersion();
+const fontawesomePro = nconf.get('fontawesome:pro') || false;
+const fontawesomeStyles = utils.getFontawesomeStyles();
+const fontawesomeVersion = utils.getFontawesomeVersion();
 
+/**
+ * Build the client-side configuration payload for a request.
+ *
+ * Site-wide values from `meta.config` are assembled first so that guests (and
+ * requests from users without stored settings) always get the ACP defaults,
+ * then per-user settings override them where applicable.
+ *
+ * @param {import('express').Request} req
+ * @returns {Promise<object>} The config object, after `filter:config.get` hooks
+ */
 apiController.loadConfig = async function (req) {
+	const defaultLang = meta.config.defaultLang || 'en-GB';
+
 	const config = {
-		url,
-		relative_path,
-		upload_url,
-		asset_base_url,
+		url: forumUrl,
+		relative_path: relativePath,
+		upload_url: uploadUrl,
+		asset_base_url: assetBaseUrl,
 		siteTitle: meta.config.title || meta.config.browserTitle || 'NodeBB',
 		browserTitle: meta.config.browserTitle || meta.config.title || 'NodeBB',
 		description: meta.config.description || '',
@@ -67,8 +79,8 @@ apiController.loadConfig = async function (req) {
 		convertPastedImageTo: meta.config.convertPastedImageTo,
 		'theme:id': meta.config['theme:id'],
 		'theme:src': meta.config['theme:src'],
-		defaultLang: meta.config.defaultLang || 'en-GB',
-		userLang: req.query.lang || meta.config.defaultLang || 'en-GB',
+		defaultLang,
+		userLang: req.query.lang || defaultLang,
 		loggedIn: !!req.user,
 		uid: req.uid,
 		'cache-buster': meta.config['cache-buster'] || '',
@@ -97,9 +109,9 @@ apiController.loadConfig = async function (req) {
 			isSafari: req.useragent && req.useragent.isSafari,
 		},
 		fontawesome: {
-			pro: fontawesome_pro,
-			styles: fontawesome_styles,
-			version: fontawesome_version,
+			pro: fontawesomePro,
+			styles: fontawesomeStyles,
+			version: fontawesomeVersion,
 		},
 		activitypub: {
 			enabled: !!meta.config.activitypubEnabled,
@@ -112,6 +124,8 @@ apiController.loadConfig = async function (req) {
 		},
 	};
 
+	// Settings are fetched for guests too, so that defaults configured in the ACP
+	// apply to them as well; `isAdminOrGlobalMod` is only meaningful when logged in.
 	const [settings, isAdminOrGlobalMod] = await Promise.all([
 		user.getSettings(req.uid),
 		req.loggedIn ? user.isAdminOrGlobalMod(req.uid) : false,
@@ -119,8 +133,9 @@ apiController.loadConfig = async function (req) {
 
 	// Handle old skin configs
 	const oldSkins = ['default'];
-	settings.bootswatchSkin = oldSkins.includes(settings.bootswatchSkin) ? '' : settings.bootswatchSkin;
+	const userSkin = oldSkins.includes(settings.bootswatchSkin) ? '' : settings.bootswatchSkin;
 
+	// Override the site-wide defaults assembled above with the user's own settings
 	config.usePagination = settings.usePagination;
 	config.topicsPerPage = settings.topicsPerPage;
 	config.postsPerPage = settings.postsPerPage;
@@ -132,11 +147,11 @@ apiController.loadConfig = async function (req) {
 	config.topicSearchEnabled = settings.topicSearchEnabled || false;
 	config.disableCustomUserSkins = meta.config.disableCustomUserSkins === 1;
 	config.defaultBootswatchSkin = config.bootswatchSkin;
-	if (!config.disableCustomUserSkins && settings.bootswatchSkin) {
-		if (settings.bootswatchSkin === 'noskin') {
+	if (!config.disableCustomUserSkins && userSkin) {
+		if (userSkin === 'noskin') {
 			config.bootswatchSkin = '';
-		} else if (settings.bootswatchSkin !== '' && await meta.css.isSkinValid(settings.bootswatchSkin)) {
-			config.bootswatchSkin = settings.bootswatchSkin;
+		} else if (await meta.css.isSkinValid(userSkin)) {
+			config.bootswatchSkin = userSkin;
 		}
 	}
 	config.hideReadNotifications = settings.hideReadNotifications;
@@ -144,20 +159,38 @@ apiController.loadConfig = async function (req) {
 	config['notificationType_new-topic-with-tag'] = settings['notificationType_new-topic-with-tag'];
 
 	// Overrides based on privilege
-	config.disableChatMessageEditing = isAdminOrGlobalMod ? false : config.disableChatMessageEditing;
+	if (isAdminOrGlobalMod) {
+		config.disableChatMessageEditing = false;
+	}
 
 	return await plugins.hooks.fire('filter:config.get', config);
 };
 
+/**
+ * Respond with the client-side configuration for the current request.
+ *
+ * The response is marked `private, no-cache` because it may carry a CSRF token.
+ *
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ * @returns {Promise<void>}
+ */
 apiController.getConfig = async function (req, res) {
 	const config = await apiController.loadConfig(req);
 	res.set('cache-control', 'private, no-cache');
 	res.json(config);
 };
 
+/**
+ * Respond with the moderators of the category named in `req.params.cid`.
+ *
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ * @returns {Promise<void>}
+ */
 apiController.getModerators = async function (req, res) {
 	const moderators = await categories.getModerators(req.params.cid);
-	res.json({ moderators: moderators });
+	res.json({ moderators });
 };
 
 require('../promisify')(apiController, ['getConfig', 'getObject', 'getModerators']);
