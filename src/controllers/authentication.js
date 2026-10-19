@@ -433,6 +433,8 @@ authenticationController.localLogin = async function (req, username, password, n
 		return next(new Error('[[error:invalid-username]]'));
 	}
 
+	// No account exists yet, but the credentials may match an entry that is
+	// still waiting in the registration queue
 	const uid = await user.getUidByUserslug(userslug);
 	if (!parseInt(uid, 10) && await user.isRegistrationPending(username, password, req.ip)) {
 		throw new Error('[[error:registration-pending]]');

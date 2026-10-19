@@ -10,19 +10,21 @@ const utils = require('../utils');
 module.exports = function (User) {
 	User.auth = {};
 
+	// Count an attempt for an IP and lock it out once `ipLoginAttempts`
+	// attempts were made within an hour. Throws `[[error:ip-locked]]` when locked.
 	User.auth.logIPAttempt = async function (ip) {
-		const onHourMs = 60 * 60 * 1000;
+		const oneHourMs = 60 * 60 * 1000;
 		const ipLocked = await db.exists(`lockout:ip:${ip}`);
 		if (ipLocked) {
 			throw new Error('[[error:ip-locked]]');
 		}
 		const ipAttempts = await db.increment(`loginAttempts:ip:${ip}`);
 		if (ipAttempts <= meta.config.ipLoginAttempts) {
-			await db.pexpire(`loginAttempts:ip:${ip}`, onHourMs);
+			await db.pexpire(`loginAttempts:ip:${ip}`, oneHourMs);
 		} else {
 			// Lock the IP
 			await db.set(`lockout:ip:${ip}`, '');
-			await db.pexpire(`lockout:ip:${ip}`, onHourMs);
+			await db.pexpire(`lockout:ip:${ip}`, oneHourMs);
 			await db.delete(`loginAttempts:ip:${ip}`);
 			await events.log({
 				type: 'ip-locked',
@@ -32,6 +34,8 @@ module.exports = function (User) {
 		}
 	};
 
+	// Count a login attempt for both the IP and the account. Throws
+	// `[[error:ip-locked]]`/`[[error:account-locked]]` when either is locked.
 	User.auth.logAttempt = async function (uid, ip) {
 		await User.auth.logIPAttempt(ip);
 

@@ -14,6 +14,11 @@ const Password = require('../password');
 const tx = require('../translator');
 
 module.exports = function (User) {
+	// Database key holding the pending registration data for a given username
+	function queueKeyForName(username) {
+		return `registration:queue:name:${username}`;
+	}
+
 	User.createOrQueue = async function (req, userData, opts = {}) {
 		User.checkUsernameLength(userData.username);
 		const queue = await User.shouldQueueUser(req.ip);
@@ -48,7 +53,7 @@ module.exports = function (User) {
 			data.hashedPassword = hashedPassword;
 		}
 		const results = await plugins.hooks.fire('filter:user.addToApprovalQueue', { data, userData });
-		await db.setObject(`registration:queue:name:${userData.username}`, results.data);
+		await db.setObject(queueKeyForName(userData.username), results.data);
 		await db.sortedSetAdd('registration:queue', Date.now(), userData.username);
 		await sendNotificationToAdmins(userData.username);
 	};
@@ -59,7 +64,7 @@ module.exports = function (User) {
 		if (usernames.includes(userData.username)) {
 			throw new Error('[[error:username-taken]]');
 		}
-		const keys = usernames.filter(Boolean).map(username => `registration:queue:name:${username}`);
+		const keys = usernames.filter(Boolean).map(queueKeyForName);
 		const data = await db.getObjectsFields(keys, ['email']);
 		const emails = data.map(data => data && data.email).filter(Boolean);
 		if (userData.email && emails.includes(userData.email)) {
@@ -79,7 +84,7 @@ module.exports = function (User) {
 	}
 
 	User.acceptRegistration = async function (username) {
-		const userData = await db.getObject(`registration:queue:name:${username}`);
+		const userData = await db.getObject(queueKeyForName(username));
 		if (!userData) {
 			throw new Error('[[error:invalid-data]]');
 		}
@@ -133,7 +138,7 @@ module.exports = function (User) {
 	async function removeFromQueue(username) {
 		await Promise.all([
 			db.sortedSetRemove('registration:queue', username),
-			db.delete(`registration:queue:name:${username}`),
+			db.delete(queueKeyForName(username)),
 		]);
 	}
 
@@ -164,7 +169,7 @@ module.exports = function (User) {
 
 	User.getRegistrationQueue = async function (start, stop) {
 		const data = await db.getSortedSetRevRangeWithScores('registration:queue', start, stop);
-		const keys = data.filter(Boolean).map(user => `registration:queue:name:${user.value}`);
+		const keys = data.filter(Boolean).map(user => queueKeyForName(user.value));
 		let users = await db.getObjects(keys);
 		users = users.filter(Boolean).map((user, index) => {
 			user.timestampISO = utils.toISOString(data[index].score);
@@ -218,19 +223,26 @@ module.exports = function (User) {
 		}
 	};
 
+	// Checks whether the given credentials match a user still waiting in the
+	// registration queue, in which case they cannot log in yet.
 	User.isRegistrationPending = async (username, password, ip) => {
-		const hashedPassword = await db.getObjectField(`registration:queue:name:${username.trim()}`, 'hashedPassword');
+		const hashedPassword = await db.getObjectField(
+			queueKeyForName(username.trim()), 'hashedPassword'
+		);
 		if (!hashedPassword) {
 			return false;
 		}
-		password = password || '';
+
+		const candidatePassword = password || '';
 		try {
-			User.isPasswordValid(password, 0);
+			User.isPasswordValid(candidatePassword, 0);
 		} catch (e) {
 			return false;
 		}
 
+		// Count the attempt against the IP so pending registrations cannot be
+		// used to brute-force this endpoint.
 		await User.auth.logIPAttempt(ip);
-		return await Password.compare(password, hashedPassword, 1);
+		return await Password.compare(candidatePassword, hashedPassword, 1);
 	};
 };
