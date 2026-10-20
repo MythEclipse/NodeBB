@@ -28,11 +28,22 @@ const crosspostCache = cacheCreate({
 const topicsController = module.exports;
 
 const url = nconf.get('url');
-const base_url = nconf.get('base_url');
-const relative_path = nconf.get('relative_path');
-const upload_url = nconf.get('upload_url');
+const baseUrl = nconf.get('base_url');
+const relativePath = nconf.get('relative_path');
+const uploadUrl = nconf.get('upload_url');
 const validSorts = ['oldest_to_newest', 'newest_to_oldest', 'most_votes'];
 
+/**
+ * Render a topic, redirecting first if the requested URL is not canonical.
+ *
+ * Slugs, post indices and sort order are all normalised here, so links that
+ * point at a stale slug or an out-of-range post end up on the canonical page.
+ *
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ * @param {import('express').NextFunction} next
+ * @returns {Promise<void>}
+ */
 topicsController.get = async function getTopic(req, res, next) {
 	const tid = req.params.topic_id;
 	if (
@@ -57,7 +68,7 @@ topicsController.get = async function getTopic(req, res, next) {
 	]);
 
 	let currentPage = parseInt(req.query.page, 10) || 1;
-	const pageCount = Math.max(1, Math.ceil((topicData && topicData.postcount) / settings.postsPerPage));
+	const pageCount = Math.max(1, Math.ceil(topicData.postcount / settings.postsPerPage));
 	const invalidPagination = (settings.usePagination && (currentPage < 1 || currentPage > pageCount));
 	if (
 		userPrivileges.disabled ||
@@ -80,12 +91,19 @@ topicsController.get = async function getTopic(req, res, next) {
 		postIndex = await topics.getUserBookmark(tid, req.uid);
 	}
 
-	if (!res.locals.isAPI && (!req.params.slug || topicData.slug !== `${tid}/${req.params.slug}`) && (topicData.slug && topicData.slug !== `${tid}/`)) {
-		return helpers.redirect(res, `/topic/${topicData.slug}${postIndex ? `/${postIndex}` : ''}${generateQueryString(req.query)}`, false);
+	const hasSlug = Boolean(topicData.slug) && topicData.slug !== `${tid}/`;
+	const hasStaleSlug = hasSlug && (!req.params.slug || topicData.slug !== `${tid}/${req.params.slug}`);
+	if (!res.locals.isAPI && hasStaleSlug) {
+		const indexSegment = postIndex ? `/${postIndex}` : '';
+		return helpers.redirect(res, `/topic/${topicData.slug}${indexSegment}${generateQueryString(req.query)}`, false);
 	}
 
-	if (utils.isNumber(postIndex) && topicData.postcount > 0 && (postIndex < 1 || postIndex > topicData.postcount)) {
-		return helpers.redirect(res, `/topic/${tid}/${req.params.slug}${postIndex > topicData.postcount ? `/${topicData.postcount}` : ''}${generateQueryString(req.query)}`);
+	const postIndexOutOfRange = utils.isNumber(postIndex) &&
+		topicData.postcount > 0 &&
+		(postIndex < 1 || postIndex > topicData.postcount);
+	if (postIndexOutOfRange) {
+		const indexSegment = postIndex > topicData.postcount ? `/${topicData.postcount}` : '';
+		return helpers.redirect(res, `/topic/${tid}/${req.params.slug}${indexSegment}${generateQueryString(req.query)}`);
 	}
 	postIndex = Math.max(1, postIndex);
 	const selectedSort = String(req.query.sort || settings.topicPostSort);
@@ -131,16 +149,14 @@ topicsController.get = async function getTopic(req, res, next) {
 	topicData.sortOption = sort;
 	topicData.sortOptionLabel = `[[topic:${sort.replace(/_/g, '-')}]]`;
 	if (!meta.config['feeds:disableRSS']) {
-		topicData.rssFeedUrl = `${relative_path}/topic/${topicData.tid}.rss`;
+		topicData.rssFeedUrl = `${relativePath}/topic/${topicData.tid}.rss`;
 		if (req.loggedIn) {
 			topicData.rssFeedUrl += `?uid=${req.uid}&token=${rssToken}`;
 		}
 	}
 
 	topicData.postIndex = postIndex;
-	const postAtIndex = topicData.posts.find(
-		p => parseInt(p.index, 10) === parseInt(Math.max(0, postIndex - 1), 10)
-	);
+	const postAtIndex = topicData.posts.find(p => parseInt(p.index, 10) === Math.max(0, postIndex - 1));
 
 	const [author, crossposts, canCrosspost] = await Promise.all([
 		user.getUserFields(topicData.uid, ['username', 'userslug']),
@@ -185,56 +201,111 @@ topicsController.get = async function getTopic(req, res, next) {
 	res.render('topic', topicData);
 };
 
+/**
+ * Whether a topic should be hidden from guests (responded to with a 404).
+ *
+ * Only uncategorised (`cid === -1`) topics whose posts have no numeric uid
+ * (i.e. remote ActivityPub topics) are hidden; everything else stays visible.
+ *
+ * @param {number} uid Uid of the requesting user
+ * @param {string} tid
+ * @param {number} cid
+ * @returns {Promise<boolean>}
+ */
 async function shouldHideTopicFromGuest(uid, tid, cid) {
-	if (uid > 0 || cid !== -1) return false;
-	const uids = await topics.getUids(tid);
-	return !uids.some(uid => utils.isNumber(uid));
+	if (uid > 0 || cid !== -1) {
+		return false;
+	}
+	const posterUids = await topics.getUids(tid);
+	return !posterUids.some(posterUid => utils.isNumber(posterUid));
 }
 
 function generateQueryString(query) {
-	const qString = qs.stringify(query);
-	return qString.length ? `?${qString}` : '';
+	const serialized = qs.stringify(query);
+	return serialized.length ? `?${serialized}` : '';
 }
 
+/**
+ * Calculate which page a given post index falls on, given the user's page size.
+ *
+ * @param {number} postIndex One-based index of the post
+ * @param {object} settings User settings; uses `postsPerPage`
+ * @returns {number} One-based page number
+ */
 function calculatePageFromIndex(postIndex, settings) {
 	return 1 + Math.floor((postIndex - 1) / settings.postsPerPage);
 }
 
+/**
+ * Calculate the post range to load for a page.
+ *
+ * Without pagination the topic is loaded from a single window centred on
+ * `postIndex`, so the selected post is visible when the page is scrolled to.
+ *
+ * @param {number} page One-based page number
+ * @param {number} postIndex One-based index of the post to centre on
+ * @param {object} settings User settings; uses `usePagination` and `postsPerPage`
+ * @returns {{start: number, stop: number}}
+ */
 function calculateStartStop(page, postIndex, settings) {
+	let startPage = page;
 	let startSkip = 0;
 
 	if (!settings.usePagination) {
 		if (postIndex > 1) {
-			page = 1;
+			startPage = 1;
 		}
 		startSkip = Math.max(0, postIndex - Math.ceil(settings.postsPerPage / 2));
 	}
 
-	const start = ((page - 1) * settings.postsPerPage) + startSkip;
+	const start = ((startPage - 1) * settings.postsPerPage) + startSkip;
 	const stop = start + settings.postsPerPage - 1;
 	return { start: Math.max(0, start), stop: Math.max(0, stop) };
 }
 
+/**
+ * Mark a topic and its notifications as read for the logged-in user.
+ *
+ * @param {import('express').Request} req
+ * @param {string} tid
+ * @returns {Promise<void>}
+ */
 async function markAsRead(req, tid) {
-	if (req.loggedIn) {
-		const markedRead = await topics.markAsRead([tid], req.uid);
-		const promises = [topics.markTopicNotificationsRead([tid], req.uid)];
-		if (markedRead) {
-			promises.push(topics.pushUnreadCount(req.uid));
-		}
-		await Promise.all(promises);
+	if (!req.loggedIn) {
+		return;
 	}
+	const markedRead = await topics.markAsRead([tid], req.uid);
+	const promises = [topics.markTopicNotificationsRead([tid], req.uid)];
+	if (markedRead) {
+		promises.push(topics.pushUnreadCount(req.uid));
+	}
+	await Promise.all(promises);
 }
 
+/**
+ * Whether the user may crosspost into any category other than `excludeCid`.
+ *
+ * The set of categories the user can crosspost to is cached per user.
+ *
+ * @param {import('express').Request} req
+ * @param {number} [excludeCid] Category to exclude from the check
+ * @returns {Promise<boolean>}
+ */
 async function loadCrosspostPrivilege(req, excludeCid) {
-	excludeCid = String(excludeCid || '');
+	const excluded = String(excludeCid || '');
 	const cidsUserCanCrosspost = await crosspostCache.get(`uid:${req.uid}`, async () => {
 		const cids = await categories.getAllCidsFromSet('categories:cid');
 		return await privileges.categories.filterCids('topics:crosspost', cids, req.uid);
 	});
-	return cidsUserCanCrosspost.some(cid => cid !== excludeCid);
+	return cidsUserCanCrosspost.some(cid => cid !== excluded);
 }
 
+/**
+ * Populate `topicData.breadcrumbs` from the topic's category hierarchy.
+ *
+ * @param {object} topicData
+ * @returns {Promise<void>}
+ */
 async function buildBreadcrumbs(topicData) {
 	const breadcrumbs = [
 		{
@@ -250,15 +321,34 @@ async function buildBreadcrumbs(topicData) {
 	topicData.breadcrumbs = parentCrumbs.concat(breadcrumbs);
 }
 
+/**
+ * Attach the topic's previous category, for moderators only.
+ *
+ * @param {object} topicData
+ * @param {object} userPrivileges
+ * @param {string} userLang
+ * @returns {Promise<void>}
+ */
 async function addOldCategory(topicData, userPrivileges, userLang) {
-	if (userPrivileges.isAdminOrMod && topicData.oldCid) {
-		topicData.oldCategory = await categories.getCategoryFields(
-			topicData.oldCid, ['cid', 'name', 'icon', 'bgColor', 'color', 'slug']
-		);
-		topicData.oldCategory.name = await translator.translate(topicData.oldCategory.name, userLang);
+	if (!userPrivileges.isAdminOrMod || !topicData.oldCid) {
+		return;
 	}
+	topicData.oldCategory = await categories.getCategoryFields(
+		topicData.oldCid, ['cid', 'name', 'icon', 'bgColor', 'color', 'slug']
+	);
+	topicData.oldCategory.name = await translator.translate(topicData.oldCategory.name, userLang);
 }
 
+/**
+ * Populate the page's meta and link tags for the topic.
+ *
+ * @param {object} topicData
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ * @param {number} currentPage
+ * @param {object} [postAtIndex] Post at the requested index, if it was loaded
+ * @returns {Promise<void>}
+ */
 async function addTags(topicData, req, res, currentPage, postAtIndex) {
 	let mainPost = topicData.posts.find(p => parseInt(p.index, 10) === 0);
 	if (!mainPost) {
@@ -355,27 +445,41 @@ async function addTags(topicData, req, res, currentPage, postAtIndex) {
 	}
 }
 
+/**
+ * Build a plain-text description from a post's content, truncated for meta tags.
+ *
+ * @param {object} [post]
+ * @returns {string} The description, or an empty string if there is no content
+ */
 function getDescriptionFromPost(post) {
-	let description = '';
-	if (post && post.content) {
-		description = utils.stripHTMLTags(utils.decodeHTMLEntities(post.content)).trim();
-		if (description.length > 160) {
-			description = `${description.slice(0, 157)}...`;
-		}
-		description = description.replace(/\n/g, ' ').trim();
+	if (!post || !post.content) {
+		return '';
 	}
-	return description;
+	let description = utils.stripHTMLTags(utils.decodeHTMLEntities(post.content)).trim();
+	if (description.length > 160) {
+		description = `${description.slice(0, 157)}...`;
+	}
+	return description.replace(/\n/g, ' ').trim();
 }
 
+/**
+ * Add `og:image` tags for post uploads, topic thumbnails, the category
+ * background image and the post author's picture.
+ *
+ * @param {import('express').Response} res
+ * @param {object} topicData
+ * @param {object} [postAtIndex]
+ * @returns {Promise<void>}
+ */
 async function addOGImageTags(res, topicData, postAtIndex) {
 	const uploads = postAtIndex ? await posts.uploads.listWithSizes(postAtIndex.pid) : [];
 	const images = uploads.filter(Boolean);
 
 	if (topicData.thumbs) {
 		const thumbs = topicData.thumbs.filter(
-			t => t && images.every(img => path.normalize(img.name) !== path.normalize(t.path))
+			thumb => thumb && images.every(img => path.normalize(img.name) !== path.normalize(thumb.path))
 		);
-		images.push(...thumbs.map(t => t.path));
+		images.push(...thumbs.map(thumb => thumb.path));
 	}
 
 	if (topicData.category.backgroundImage && (!postAtIndex || !postAtIndex.index)) {
@@ -384,23 +488,30 @@ async function addOGImageTags(res, topicData, postAtIndex) {
 	if (postAtIndex && postAtIndex.user && postAtIndex.user.picture) {
 		images.push(postAtIndex.user.picture);
 	}
-	images.forEach(path => addOGImageTag(res, path));
+	images.forEach(image => addOGImageTag(res, image));
 }
 
+/**
+ * Add `og:image` meta tags for a single image, absolutising relative URLs.
+ *
+ * @param {import('express').Response} res
+ * @param {string|object} image Image path, or an upload object with `name`/`width`/`height`
+ * @returns {void}
+ */
 function addOGImageTag(res, image) {
 	const isObject = typeof image === 'object' && image.name;
 	let imageUrl = isObject ? image.name : image;
-	if (!(typeof imageUrl === 'string')) {
+	if (typeof imageUrl !== 'string') {
 		return;
 	}
 
 	if (!imageUrl.startsWith('http')) {
-		if (imageUrl.startsWith(`${relative_path}${upload_url}`)) {
+		if (imageUrl.startsWith(`${relativePath}${uploadUrl}`)) {
 			// (https://domain.com) + imageUrl (which starts with /relative_path/upload_url)
-			imageUrl = base_url + imageUrl;
+			imageUrl = baseUrl + imageUrl;
 		} else {
 			// (https://domain.com/forum) + (/assets/uploads) + (/files/imagePath)
-			imageUrl = url + path.posix.join(upload_url, imageUrl);
+			imageUrl = url + path.posix.join(uploadUrl, imageUrl);
 		}
 	}
 
@@ -423,6 +534,17 @@ function addOGImageTag(res, image) {
 	}
 }
 
+/**
+ * Respond with the summary of a topic's latest undeleted post.
+ *
+ * Missing, unreadable and empty topics all yield the same 404 response so that
+ * private topics are indistinguishable from non-existent ones.
+ *
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ * @param {import('express').NextFunction} next
+ * @returns {Promise<void>}
+ */
 topicsController.teaser = async function (req, res, next) {
 	const tid = req.params.topic_id;
 	if (!utils.isNumber(tid)) {
@@ -443,6 +565,14 @@ topicsController.teaser = async function (req, res, next) {
 	res.json(postData[0]);
 };
 
+/**
+ * Respond with pagination metadata for a topic.
+ *
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ * @param {import('express').NextFunction} next
+ * @returns {Promise<void>}
+ */
 topicsController.pagination = async function (req, res, next) {
 	const tid = req.params.topic_id;
 	const currentPage = parseInt(req.query.page, 10) || 1;
