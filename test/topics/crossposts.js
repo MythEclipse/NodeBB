@@ -14,8 +14,60 @@ const topics = require('../../src/topics');
 const posts = require('../../src/posts');
 const privileges = require('../../src/privileges');
 const activitypub = require('../../src/activitypub');
-const helpers = require('../helpers');
 const utils = require('../../src/utils');
+const helpers = require('../helpers');
+const apHelpers = require('../activitypub/helpers');
+
+/**
+ * Generates a short, unique name/username so fixtures don't collide between suites.
+ *
+ * @returns {string}
+ */
+const uniqueName = () => utils.generateUUID().slice(0, 8);
+
+/**
+ * Creates a category with a unique name.
+ *
+ * @returns {Promise<{cid: number, name: string}>}
+ */
+const createCategory = async () => categories.create({ name: uniqueName() });
+
+/**
+ * Creates a user, allowing callers to override any of the default fields.
+ *
+ * @param {object} [data] Fields to pass to `user.create`
+ * @returns {Promise<number>} The new user's uid
+ */
+const createUser = async (data = {}) => user.create({ username: uniqueName(), ...data });
+
+/**
+ * Creates a topic in the given category, with generated title and content.
+ *
+ * @param {number} uid Author uid
+ * @param {number} cid Category cid
+ * @returns {Promise<object>} The created topic's data
+ */
+const createTopic = async (uid, cid) => {
+	const { topicData } = await topics.post({
+		uid,
+		cid,
+		title: utils.generateUUID(),
+		content: utils.generateUUID(),
+	});
+	return topicData;
+};
+
+/**
+ * Creates a user with a known password and logs them in.
+ *
+ * @returns {Promise<{uid: number, login: object}>}
+ */
+const createUserWithLogin = async () => {
+	const username = uniqueName();
+	const uid = await createUser({ username, password: '123456' });
+	const login = await helpers.loginUser(username, '123456');
+	return { uid, login };
+};
 
 describe('Crossposting (& related logic)', () => {
 	before(async () => {
@@ -30,20 +82,14 @@ describe('Crossposting (& related logic)', () => {
 		let uid;
 
 		before(async () => {
-			({ cid: cid1 } = await categories.create({ name: utils.generateUUID().slice(0, 8) }));
-			uid = await user.create({ username: utils.generateUUID().slice(0, 8) });
-			const { topicData } = await topics.post({
-				uid,
-				cid: cid1,
-				title: utils.generateUUID(),
-				content: utils.generateUUID(),
-			});
+			({ cid: cid1 } = await createCategory());
+			uid = await createUser();
+			const topicData = await createTopic(uid, cid1);
 			tid = topicData.tid;
 
 			// Add topic to another category's zset
-			const crosspostCategory = await categories.create({ name: utils.generateUUID().slice(0, 8) });
-			cid2 = crosspostCategory.cid;
-			await db.sortedSetAdd(`cid:${crosspostCategory.cid}:tids`, topicData.timestamp, tid);
+			({ cid: cid2 } = await createCategory());
+			await db.sortedSetAdd(`cid:${cid2}:tids`, topicData.timestamp, tid);
 		});
 
 		it('should contain the topic in both categories when requested', async () => {
@@ -72,17 +118,10 @@ describe('Crossposting (& related logic)', () => {
 		let uid;
 
 		before(async () => {
-			({ cid: cid1 } = await categories.create({ name: utils.generateUUID().slice(0, 8) }));
-			const crosspostCategory = await categories.create({ name: utils.generateUUID().slice(0, 8) });
-			cid2 = crosspostCategory.cid;
-			uid = await user.create({ username: utils.generateUUID().slice(0, 8) });
-			const { topicData } = await topics.post({
-				uid,
-				cid: cid1,
-				title: utils.generateUUID(),
-				content: utils.generateUUID(),
-			});
-			tid = topicData.tid;
+			({ cid: cid1 } = await createCategory());
+			({ cid: cid2 } = await createCategory());
+			uid = await createUser();
+			tid = (await createTopic(uid, cid1)).tid;
 		});
 
 		it('should not allow a spider (uid -1) to crosspost', async () => {
@@ -161,23 +200,16 @@ describe('Crossposting (& related logic)', () => {
 		let uid;
 
 		before(async () => {
-			({ cid: cid1 } = await categories.create({ name: utils.generateUUID().slice(0, 8) }));
-			const crosspostCategory = await categories.create({ name: utils.generateUUID().slice(0, 8) });
-			cid2 = crosspostCategory.cid;
-			uid = await user.create({ username: utils.generateUUID().slice(0, 8) });
-			const { topicData } = await topics.post({
-				uid,
-				cid: cid1,
-				title: utils.generateUUID(),
-				content: utils.generateUUID(),
-			});
-			tid = topicData.tid;
+			({ cid: cid1 } = await createCategory());
+			({ cid: cid2 } = await createCategory());
+			uid = await createUser();
+			tid = (await createTopic(uid, cid1)).tid;
 
 			await topics.crossposts.add(tid, cid2, uid);
 		});
 
 		it('should not let another user uncrosspost', async () => {
-			const uid2 = await user.create({ username: utils.generateUUID().slice(0, 8) });
+			const uid2 = await createUser();
 			await assert.rejects(
 				topics.crossposts.remove(tid, cid2, uid2),
 				{ message: '[[error:invalid-data]]' },
@@ -218,20 +250,13 @@ describe('Crossposting (& related logic)', () => {
 		let privUid;
 
 		before(async () => {
-			({ cid: cid1 } = await categories.create({ name: utils.generateUUID().slice(0, 8) }));
-			const crosspostCategory = await categories.create({ name: utils.generateUUID().slice(0, 8) });
-			cid2 = crosspostCategory.cid;
-			uid = await user.create({ username: utils.generateUUID().slice(0, 8) });
-			privUid = await user.create({ username: utils.generateUUID().slice(0, 8) });
+			({ cid: cid1 } = await createCategory());
+			({ cid: cid2 } = await createCategory());
+			uid = await createUser();
+			privUid = await createUser();
 			await groups.join('administrators', privUid);
 
-			const { topicData } = await topics.post({
-				uid,
-				cid: cid1,
-				title: utils.generateUUID(),
-				content: utils.generateUUID(),
-			});
-			tid = topicData.tid;
+			tid = (await createTopic(uid, cid1)).tid;
 
 			await topics.crossposts.add(tid, cid2, uid);
 		});
@@ -252,20 +277,13 @@ describe('Crossposting (& related logic)', () => {
 		let privUid;
 
 		before(async () => {
-			({ cid: cid1 } = await categories.create({ name: utils.generateUUID().slice(0, 8) }));
-			const crosspostCategory = await categories.create({ name: utils.generateUUID().slice(0, 8) });
-			cid2 = crosspostCategory.cid;
-			uid = await user.create({ username: utils.generateUUID().slice(0, 8) });
-			privUid = await user.create({ username: utils.generateUUID().slice(0, 8) });
+			({ cid: cid1 } = await createCategory());
+			({ cid: cid2 } = await createCategory());
+			uid = await createUser();
+			privUid = await createUser();
 			await groups.join('Global Moderators', privUid);
 
-			const { topicData } = await topics.post({
-				uid,
-				cid: cid1,
-				title: utils.generateUUID(),
-				content: utils.generateUUID(),
-			});
-			tid = topicData.tid;
+			tid = (await createTopic(uid, cid1)).tid;
 
 			await topics.crossposts.add(tid, cid2, uid);
 		});
@@ -286,19 +304,12 @@ describe('Crossposting (& related logic)', () => {
 		let privUid;
 
 		before(async () => {
-			({ cid: cid1 } = await categories.create({ name: utils.generateUUID().slice(0, 8) }));
-			const crosspostCategory = await categories.create({ name: utils.generateUUID().slice(0, 8) });
-			cid2 = crosspostCategory.cid;
-			uid = await user.create({ username: utils.generateUUID().slice(0, 8) });
-			privUid = await user.create({ username: utils.generateUUID().slice(0, 8) });
+			({ cid: cid1 } = await createCategory());
+			({ cid: cid2 } = await createCategory());
+			uid = await createUser();
+			privUid = await createUser();
 
-			const { topicData } = await topics.post({
-				uid,
-				cid: cid1,
-				title: utils.generateUUID(),
-				content: utils.generateUUID(),
-			});
-			tid = topicData.tid;
+			tid = (await createTopic(uid, cid1)).tid;
 
 			await topics.crossposts.add(tid, cid2, uid);
 		});
@@ -327,17 +338,10 @@ describe('Crossposting (& related logic)', () => {
 		let uid;
 
 		before(async () => {
-			({ cid: cid1 } = await categories.create({ name: utils.generateUUID().slice(0, 8) }));
-			const crosspostCategory = await categories.create({ name: utils.generateUUID().slice(0, 8) });
-			cid2 = crosspostCategory.cid;
-			uid = await user.create({ username: utils.generateUUID().slice(0, 8) });
-			const { topicData } = await topics.post({
-				uid,
-				cid: cid1,
-				title: utils.generateUUID(),
-				content: utils.generateUUID(),
-			});
-			tid = topicData.tid;
+			({ cid: cid1 } = await createCategory());
+			({ cid: cid2 } = await createCategory());
+			uid = await createUser();
+			tid = (await createTopic(uid, cid1)).tid;
 
 			await topics.crossposts.add(tid, cid2, uid);
 			await topics.delete(tid, uid);
@@ -357,17 +361,10 @@ describe('Crossposting (& related logic)', () => {
 		let uid;
 
 		before(async () => {
-			({ cid: cid1 } = await categories.create({ name: utils.generateUUID().slice(0, 8) }));
-			const crosspostCategory = await categories.create({ name: utils.generateUUID().slice(0, 8) });
-			cid2 = crosspostCategory.cid;
-			uid = await user.create({ username: utils.generateUUID().slice(0, 8) });
-			const { topicData } = await topics.post({
-				uid,
-				cid: cid1,
-				title: utils.generateUUID(),
-				content: utils.generateUUID(),
-			});
-			tid = topicData.tid;
+			({ cid: cid1 } = await createCategory());
+			({ cid: cid2 } = await createCategory());
+			uid = await createUser();
+			tid = (await createTopic(uid, cid1)).tid;
 
 			await topics.crossposts.add(tid, cid2, uid);
 			await topics.purge(tid, uid);
@@ -386,12 +383,10 @@ describe('Crossposting (& related logic)', () => {
 		let pid;
 		let post;
 
-		const helpers = require('../activitypub/helpers');
-
 		before(async () => {
-			({ cid } = await categories.create({ name: utils.generateUUID().slice(0, 8) }));
-			({ id: remoteCid } = helpers.mocks.group());
-			({ id: pid, note: post } = helpers.mocks.note({
+			({ cid } = await createCategory());
+			({ id: remoteCid } = apHelpers.mocks.group());
+			({ id: pid, note: post } = apHelpers.mocks.note({
 				audience: [remoteCid],
 			}));
 
@@ -404,7 +399,7 @@ describe('Crossposting (& related logic)', () => {
 		});
 
 		it('should automatically cross-post the topic when the remote category announces', async () => {
-			const { activity: body } = helpers.mocks.announce({
+			const { activity: body } = apHelpers.mocks.announce({
 				actor: remoteCid,
 				object: post,
 			});
@@ -435,15 +430,13 @@ describe('Crossposting (& related logic)', () => {
 		let pid;
 		let post;
 
-		const helpers = require('../activitypub/helpers');
-
 		before(async () => {
-			const preferredUsername = utils.generateUUID().slice(0, 8);
-			({ cid } = await categories.create({ name: utils.generateUUID().slice(0, 8) }));
-			({ id: remoteCid } = helpers.mocks.group({
+			const preferredUsername = uniqueName();
+			({ cid } = await createCategory());
+			({ id: remoteCid } = apHelpers.mocks.group({
 				preferredUsername,
 			}));
-			({ id: pid, note: post } = helpers.mocks.note({
+			({ id: pid, note: post } = apHelpers.mocks.note({
 				audience: [remoteCid],
 				tag: [
 					{
@@ -484,25 +477,17 @@ describe('Crossposting (& related logic)', () => {
 			let uid;
 			let pid;
 
-			const helpers = require('../activitypub/helpers');
-
 			before(async () => {
-				({ cid: cid1 } = await categories.create({ name: utils.generateUUID().slice(0, 8) }));
-				const crosspostCategory = await categories.create({ name: utils.generateUUID().slice(0, 8) });
-				cid2 = crosspostCategory.cid;
-				uid = await user.create({ username: utils.generateUUID().slice(0, 8) });
-				const { topicData } = await topics.post({
-					uid,
-					cid: cid1,
-					title: utils.generateUUID(),
-					content: utils.generateUUID(),
-				});
+				({ cid: cid1 } = await createCategory());
+				({ cid: cid2 } = await createCategory());
+				uid = await createUser();
+				const topicData = await createTopic(uid, cid1);
 				tid = topicData.tid;
 				pid = topicData.mainPid;
 
 				// Add some remote followers
 				await Promise.all([cid1, cid2].map(async (cid) => {
-					const {activity} = helpers.mocks.follow({
+					const { activity } = apHelpers.mocks.follow({
 						object: {
 							id: `${nconf.get('url')}/category/${cid}`,
 						},
@@ -530,11 +515,11 @@ describe('Crossposting (& related logic)', () => {
 			});
 
 			it('should only federate an Announce on a remote reply from the canonical cid', async () => {
-				const { note: object } = helpers.mocks.note({
+				const { note: object } = apHelpers.mocks.note({
 					audience: `${nconf.get('url')}/category/${cid1}`,
 					inReplyTo: `${nconf.get('url')}/post/${pid}`,
 				});
-				const { activity } = helpers.mocks.create(object);
+				const { activity } = apHelpers.mocks.create(object);
 				await activitypub.inbox.create({
 					body: activity,
 				});
@@ -554,7 +539,7 @@ describe('Crossposting (& related logic)', () => {
 			});
 
 			it('should only federate an Announce on a remote like from the canonical cid', async () => {
-				const { activity: body } = helpers.mocks.like({
+				const { activity: body } = apHelpers.mocks.like({
 					object: {
 						id: `${nconf.get('url')}/post/${pid}`,
 					},
@@ -583,16 +568,14 @@ describe('Crossposting (& related logic)', () => {
 			let uid;
 			let pid;
 
-			const apHelpers = require('../activitypub/helpers');
-
 			before(async () => {
 				({ id: remoteCid } = apHelpers.mocks.group());
 				await activitypub.actors.assertGroup(remoteCid);
-				({ cid } = await categories.create({ name: utils.generateUUID().slice(0, 8) }));
-				uid = await user.create({ username: utils.generateUUID().slice(0, 8) });
+				({ cid } = await createCategory());
+				uid = await createUser();
 
 				({ id: pid } = apHelpers.mocks.note());
-				await activitypub.notes.assert(0, pid, { skipChecks: 1, cid: remoteCid });
+				await activitypub.notes.assert(0, pid, { skipChecks: true, cid: remoteCid });
 
 				tid = await posts.getPostField(pid, 'tid');
 
@@ -611,12 +594,10 @@ describe('Crossposting (& related logic)', () => {
 			});
 
 			it('should send an Announce to the topic author when crossposted to a local category', async () => {
-				const username = utils.generateUUID().slice(0, 8);
-				const crossposter = await user.create({ username, password: '123456' });
-				const login = await helpers.loginUser(username, '123456');
+				const { uid: crossposter, login } = await createUserWithLogin();
 				activitypub._sent.clear();
 
-				const crosspostCid = (await categories.create({ name: utils.generateUUID().slice(0, 8) })).cid;
+				const crosspostCid = (await createCategory()).cid;
 				const result = await helpers.request('post', `/api/v3/topics/${tid}/crossposts`, {
 					jar: login.jar,
 					csrf_token: login.csrf_token,
@@ -637,12 +618,10 @@ describe('Crossposting (& related logic)', () => {
 			});
 
 			it('should not send an Announce when crossposted to a non-federated category', async () => {
-				const username = utils.generateUUID().slice(0, 8);
-				const crossposter = await user.create({ username, password: '123456' });
-				const login = await helpers.loginUser(username, '123456');
+				const { login } = await createUserWithLogin();
 				activitypub._sent.clear();
 
-				const crosspostCid = (await categories.create({ name: utils.generateUUID().slice(0, 8) })).cid;
+				const crosspostCid = (await createCategory()).cid;
 				await privileges.categories.rescind(['groups:topics:read'], crosspostCid, 'fediverse');
 				const result = await helpers.request('post', `/api/v3/topics/${tid}/crossposts`, {
 					jar: login.jar,
@@ -661,25 +640,21 @@ describe('Crossposting (& related logic)', () => {
 			let uid;
 			let pid;
 
-			const apHelpers = require('../activitypub/helpers');
-
 			before(async () => {
-				({ cid } = await categories.create({ name: utils.generateUUID().slice(0, 8) }));
-				uid = await user.create({ username: utils.generateUUID().slice(0, 8) });
+				({ cid } = await createCategory());
+				uid = await createUser();
 
 				({ id: pid } = apHelpers.mocks.note());
-				await activitypub.notes.assert(0, pid, { skipChecks: 1 });
+				await activitypub.notes.assert(0, pid, { skipChecks: true });
 
 				tid = await posts.getPostField(pid, 'tid');
 			});
 
 			it('should send an Announce to the topic author when crossposted to a local category', async () => {
-				const username = utils.generateUUID().slice(0, 8);
-				const crossposter = await user.create({ username, password: '123456' });
-				const login = await helpers.loginUser(username, '123456');
+				const { uid: crossposter, login } = await createUserWithLogin();
 				activitypub._sent.clear();
 
-				const crosspostCid = (await categories.create({ name: utils.generateUUID().slice(0, 8) })).cid;
+				const crosspostCid = (await createCategory()).cid;
 				const result = await helpers.request('post', `/api/v3/topics/${tid}/crossposts`, {
 					jar: login.jar,
 					csrf_token: login.csrf_token,
