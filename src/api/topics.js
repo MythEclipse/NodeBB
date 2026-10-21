@@ -293,6 +293,18 @@ topicsAPI.bump = async (caller, { tid }) => {
 	activitypub.out.announce.topic(tid, caller.uid);
 };
 
+/**
+ * Move one or more topics into another category.
+ *
+ * The destination cid is coerced to a string up-front so that the privilege
+ * checks below and the values handed to `topics.tools.move` agree on its type.
+ *
+ * @param {object} caller The requesting user
+ * @param {object} data
+ * @param {string|number|Array<string|number>} data.tid Topic id(s) to move
+ * @param {string|number} data.cid Destination category id
+ * @returns {Promise<void>}
+ */
 topicsAPI.move = async (caller, { tid, cid }) => {
 	const tids = Array.isArray(tid) ? tid : [tid];
 	cid = String(cid);

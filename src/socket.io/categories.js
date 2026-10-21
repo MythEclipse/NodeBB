@@ -109,12 +109,22 @@ SocketCategories.ignore = async function (socket, data) {
 	return await ignoreOrWatch(user.ignoreCategory, socket, data);
 };
 
+/**
+ * Shared implementation of the `watch`/`ignore` socket methods.
+ *
+ * Each entry in `data.cid` is normalised to a string, and all descendants of
+ * those categories are included before `fn` is applied to the target user.
+ *
+ * @param {Function} fn `user.watchCategory` or `user.ignoreCategory`
+ * @param {object} socket
+ * @param {object} data
+ * @param {string|number|Array<string|number>} data.cid
+ * @returns {Promise<string[]>} The affected cids
+ */
 async function ignoreOrWatch(fn, socket, data) {
 	let targetUid = socket.uid;
-	const cids = Array.isArray(data.cid) ?
-		data.cid.map(cid => String(cid)) :
-		[String(data.cid)];
-	if (data.hasOwnProperty('uid')) {
+	const cids = (Array.isArray(data.cid) ? data.cid : [data.cid]).map(cid => String(cid));
+	if (Object.hasOwn(data, 'uid')) {
 		targetUid = data.uid;
 	}
 	await user.isAdminOrGlobalModOrSelf(socket.uid, targetUid);

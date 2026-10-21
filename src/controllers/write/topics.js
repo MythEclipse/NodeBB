@@ -226,6 +226,13 @@ Topics.getCrossposts = async (req, res) => {
 	helpers.formatApiResponse(200, res, { crossposts });
 };
 
+/**
+ * Crosspost a topic into the category given by `req.body.cid`.
+ *
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ * @returns {Promise<void>}
+ */
 Topics.crosspost = async (req, res) => {
 	const cid = String(req.body.cid);
 	const crossposts = await topics.crossposts.add(req.params.tid, cid, req.uid);
@@ -234,6 +241,14 @@ Topics.crosspost = async (req, res) => {
 	helpers.formatApiResponse(200, res, { crossposts });
 };
 
+/**
+ * Remove a topic's crosspost into the category given by `req.body.cid` or
+ * `req.query.cid`.
+ *
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ * @returns {Promise<void>}
+ */
 Topics.uncrosspost = async (req, res) => {
 	const cid = String(req.body.cid || req.query.cid);
 	const crossposts = await topics.crossposts.remove(req.params.tid, cid, req.uid);

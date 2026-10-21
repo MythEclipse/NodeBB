@@ -94,11 +94,20 @@ Crossposts.syncCrosspostedTopicCids = async function (crossposts, topicData) {
 	}
 };
 
+/**
+ * Crosspost a topic into another category.
+ *
+ * `cid` is coerced up-front so that every comparison and database key below uses
+ * the same string form; a numeric cid must not bypass the checks that follow.
+ *
+ * @param {string|number} tid
+ * @param {string|number} cid Destination cid, local or remote (ActivityPub) identifier
+ * @param {string|number} uid Actor performing the crosspost
+ * @returns {Promise<object[]>} The topic's crossposts, including the new one
+ */
 Crossposts.add = async function (tid, cid, uid) {
-	/**
-	 * NOTE: If uid is 0, the assumption is that it is a "system" crosspost, not a guest!
-	 * (Normally guest uid is 0)
-	 */
+	// NOTE: If uid is 0, the assumption is that it is a "system" crosspost, not a guest!
+	// (Normally guest uid is 0)
 	cid = String(cid);
 	// Target cid must exist
 	if (!utils.isNumber(cid)) {
@@ -123,7 +132,7 @@ Crossposts.add = async function (tid, cid, uid) {
 	const crosspostedCids = crossposts.map(crosspost => String(crosspost.cid));
 	const now = Date.now();
 	const crosspostId = utils.generateUUID();
-	if (!crosspostedCids.includes(String(cid))) {
+	if (!crosspostedCids.includes(cid)) {
 		const [topicData, pids, tags] = await Promise.all([
 			topics.getTopicFields(tid, [
 				'uid', 'cid', 'timestamp', 'lastposttime', 'pinned',
@@ -132,10 +141,10 @@ Crossposts.add = async function (tid, cid, uid) {
 			topics.getPids(tid),
 			topics.getTopicTags(tid),
 		]);
-		let pidTimestamps = await posts.getPostsFields(pids, ['timestamp']);
-		pidTimestamps = pidTimestamps.map(({ timestamp }) => timestamp);
+		const pidTimestamps = (await posts.getPostsFields(pids, ['timestamp']))
+			.map(({ timestamp }) => timestamp);
 
-		if (cid === topicData.cid) {
+		if (cid === String(topicData.cid)) {
 			throw new Error('[[error:invalid-cid]]');
 		}
 
@@ -190,19 +199,28 @@ Crossposts.queue = async function (tid, cid, uid) {
 	});
 };
 
+/**
+ * Remove a topic's crosspost into the given category.
+ *
+ * `cid` is coerced before the moderator check, so a caller cannot pass a type
+ * that compares equal in one place and not another.
+ *
+ * @param {string|number} tid
+ * @param {string|number} cid Destination cid of the crosspost to remove
+ * @param {string|number} uid Actor performing the removal
+ * @returns {Promise<object[]>} The topic's remaining crossposts
+ */
 Crossposts.remove = async function (tid, cid, uid) {
 	cid = String(cid);
-	let crossposts = await Crossposts.get(tid);
+	const crossposts = await Crossposts.get(tid);
 	const [isPrivileged, isMod] = await Promise.all([
 		user.isAdminOrGlobalMod(uid),
 		user.isModerator(uid, cid),
 	]);
-	const crosspostId = crossposts.reduce((id, { id: _id, cid: _cid, uid: _uid }) => {
-		if (String(cid) === String(_cid) && (isPrivileged || isMod || String(uid) === String(_uid))) {
-			id = _id;
-		}
-
-		return id;
+	const crosspostId = crossposts.reduce((id, { id: crosspost, cid: crosspostCid, uid: crosspostUid }) => {
+		const sameCid = cid === String(crosspostCid);
+		const canRemove = isPrivileged || isMod || String(uid) === String(crosspostUid);
+		return sameCid && canRemove ? crosspost : id;
 	}, null);
 	if (!crosspostId) {
 		throw new Error('[[error:invalid-data]]');
@@ -242,8 +260,7 @@ Crossposts.remove = async function (tid, cid, uid) {
 		topics.events.purge(tid, eventIds);
 	}).catch(err => winston.error(err));
 
-	crossposts = await Crossposts.get(tid);
-	return crossposts;
+	return await Crossposts.get(tid);
 };
 
 Crossposts.removeAll = async function (tids) {

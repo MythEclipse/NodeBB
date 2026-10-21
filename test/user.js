@@ -218,13 +218,13 @@ describe('User', () => {
 			assert.strictEqual(isModerator, false);
 		});
 
-		it('should return two false results', async () => {
+		it('should return two false results for multiple uids', async () => {
 			const isModerator = await User.isModerator([testUid, testUid], testCid);
 			assert.strictEqual(isModerator[0], false);
 			assert.strictEqual(isModerator[1], false);
 		});
 
-		it('should return two false results', async () => {
+		it('should return two false results for multiple cids', async () => {
 			const isModerator = await User.isModerator(testUid, [testCid, testCid]);
 			assert.strictEqual(isModerator[0], false);
 			assert.strictEqual(isModerator[1], false);

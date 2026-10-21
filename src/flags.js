@@ -695,6 +695,17 @@ Flags.canFlag = async function (type, id, uid, skipLimitCheck = false) {
 	}
 };
 
+/**
+ * Whether a user is allowed to see a flag.
+ *
+ * Post flags are visible to moderators of the post's category, as well as to
+ * administrators and global moderators. The category id is compared as a string
+ * because that is the form the privilege helpers key on.
+ *
+ * @param {string|number} flagId
+ * @param {string|number} uid
+ * @returns {Promise<boolean>}
+ */
 Flags.canView = async (flagId, uid) => {
 	const exists = await db.isSortedSetMember('flags:datetime', flagId);
 	if (!exists) {
@@ -715,8 +726,8 @@ Flags.canView = async (flagId, uid) => {
 	}
 
 	if (type === 'post') {
-		const cid = await Flags.getTargetCid(type, targetId);
-		const isModerator = await user.isModerator(uid, String(cid));
+		const cid = String(await Flags.getTargetCid(type, targetId));
+		const isModerator = await user.isModerator(uid, cid);
 
 		return isAdminOrGlobalMod || isModerator;
 	}

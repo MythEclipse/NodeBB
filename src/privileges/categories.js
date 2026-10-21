@@ -113,6 +113,17 @@ privsCategories.listAll = async function () {
 	return payload;
 };
 
+/**
+ * Get the privileges a user holds in a category, along with the flags the
+ * front end uses to render them.
+ *
+ * The cid is normalised to a string so numeric and string callers resolve to
+ * the same privilege keys.
+ *
+ * @param {string|number} cid
+ * @param {string|number} uid
+ * @returns {Promise<object>} Privilege data, after `filter:privileges.categories.get`
+ */
 privsCategories.get = async function (cid, uid) {
 	const privs = [
 		'topics:create', 'topics:read', 'topics:schedule',
@@ -248,12 +259,20 @@ privsCategories.rescind = async function (privileges, cid, members) {
 	});
 };
 
+/**
+ * Whether a user may move all topics out of one category and into another.
+ *
+ * @param {string|number} currentCid
+ * @param {string|number} targetCid
+ * @param {string|number} uid
+ * @returns {Promise<boolean>}
+ */
 privsCategories.canMoveAllTopics = async function (currentCid, targetCid, uid) {
-	const [isAdmin, isModerators] = await Promise.all([
+	const [isAdmin, moderates] = await Promise.all([
 		user.isAdministrator(uid),
 		user.isModerator(uid, [String(currentCid), String(targetCid)]),
 	]);
-	return isAdmin || !isModerators.includes(false);
+	return isAdmin || !moderates.includes(false);
 };
 
 privsCategories.canPostTopic = async function (uid) {
