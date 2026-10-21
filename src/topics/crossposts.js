@@ -14,47 +14,83 @@ const utils = require('../utils');
 
 const Crossposts = module.exports;
 
+// Sorted sets on category tids that mirror data owned by the topic's own category.
+// `key` is the suffix after `cid:<cid>:`, and `field` is the topic field holding the score.
+const reconciledScores = [
+	{ key: 'tids:posts', field: 'postcount' },
+	{ key: 'tids:votes', field: 'votes' },
+	{ key: 'tids:views', field: 'viewcount' },
+];
+
+/**
+ * Convert a numeric string to a number, leaving non-numeric values (such as
+ * ActivityPub ids) untouched.
+ *
+ * @param {string|number} value
+ * @returns {string|number}
+ */
+function toNumberIfNumeric(value) {
+	return utils.isNumber(value) ? parseInt(value, 10) : value;
+}
+
+/**
+ * Fetch a topic's crossposts.
+ *
+ * @param {string|number|Array<string|number>} tids A tid, or an array of tids
+ * @param {number} [uid] Viewer uid. When set, crossposts into categories the viewer
+ * cannot find are omitted.
+ * @returns {Promise<object[]|object[][]>} Crossposts, shaped to match `tids`
+ */
 Crossposts.get = async function (tids, uid) {
 	const isArray = Array.isArray(tids);
 	if (!isArray) {
 		tids = [tids];
 	}
 
-	const crosspostIds = await db.getSortedSetsMembers(tids.map(tid => `tid:${tid}:crossposts`));
-	const allCrosspostIds = crosspostIds.flat();
-	const allCrossposts = await db.getObjects(allCrosspostIds.map(id => `crosspost:${id}`));
+	const crosspostIdsByTid = await db.getSortedSetsMembers(tids.map(tid => `tid:${tid}:crossposts`));
+	const crosspostIds = crosspostIdsByTid.flat();
+	const crossposts = await db.getObjects(crosspostIds.map(id => `crosspost:${id}`));
 
-	const allCids = _.uniq(allCrossposts.map(c => c.cid));
+	const allCids = _.uniq(crossposts.map(crosspost => crosspost.cid));
 	const allowedCids = uid ? await privileges.categories.filterCids('find', allCids, uid) : allCids;
 
 	const categoriesData = await categories.getCategoriesFields(
 		allowedCids, ['cid', 'name', 'icon', 'bgColor', 'color', 'slug']
 	);
-
-	const categoriesMap = categoriesData.reduce((map, category) => {
-		map.set(parseInt(category.cid, 10), category);
-		return map;
-	}, new Map());
+	const categoriesMap = new Map(
+		categoriesData.map(category => [parseInt(category.cid, 10), category])
+	);
 
 	const allowedCidSet = new Set(allowedCids);
-	const crosspostEntries = allCrosspostIds.map((id, index) => ({ id, crosspost: allCrossposts[index] }))
+	const visibleCrossposts = crosspostIds
+		.map((id, index) => ({ id, crosspost: crossposts[index] }))
 		.filter(({ crosspost }) => !uid || allowedCidSet.has(crosspost.cid));
 
-	const crosspostMap = crosspostEntries.reduce((map, { id, crosspost }) => {
-		if (id && crosspost) {
-			map.set(id, crosspost);
-			crosspost.id = id;
-			crosspost.category = categoriesMap.get(parseInt(crosspost.cid, 10));
-			crosspost.uid = utils.isNumber(crosspost.uid) ? parseInt(crosspost.uid, 10) : crosspost.uid;
-			crosspost.cid = utils.isNumber(crosspost.cid) ? parseInt(crosspost.cid, 10) : crosspost.cid;
+	const crosspostMap = new Map();
+	visibleCrossposts.forEach(({ id, crosspost }) => {
+		if (!id || !crosspost) {
+			return;
 		}
-		return map;
-	}, new Map());
+		crosspost.id = id;
+		crosspost.category = categoriesMap.get(parseInt(crosspost.cid, 10));
+		crosspost.uid = toNumberIfNumeric(crosspost.uid);
+		crosspost.cid = toNumberIfNumeric(crosspost.cid);
+		crosspostMap.set(id, crosspost);
+	});
 
-	const crossposts = crosspostIds.map(ids => ids.map(id => crosspostMap.get(id)).filter(Boolean));
-	return isArray ? crossposts : crossposts[0];
+	const crosspostsByTid = crosspostIdsByTid.map(
+		ids => ids.map(id => crosspostMap.get(id)).filter(Boolean)
+	);
+	return isArray ? crosspostsByTid : crosspostsByTid[0];
 };
 
+/**
+ * Reconcile the post/vote/view scores that crossposted categories hold for a topic.
+ *
+ * @param {object[]} crossposts The topic's crossposts
+ * @param {object} topicData Topic data containing `tid`, `pinned` and the score fields
+ * @returns {Promise<void>}
+ */
 Crossposts.syncCrosspostedTopicCids = async function (crossposts, topicData) {
 	// `:tids:posts`, `:tids:votes` and `:tids:views` are only written for the topic's own
 	// category, so crossposted categories keep the values they were seeded with. Reconcile
@@ -65,28 +101,21 @@ Crossposts.syncCrosspostedTopicCids = async function (crossposts, topicData) {
 	}
 
 	const cids = crossposts.map(crosspost => crosspost.cid);
-	const count = cids.length;
-	const scores = await db.sortedSetsScore([
-		...cids.map(cid => `cid:${cid}:tids:posts`),
-		...cids.map(cid => `cid:${cid}:tids:votes`),
-		...cids.map(cid => `cid:${cid}:tids:views`),
-	], topicData.tid);
+	const scores = await db.sortedSetsScore(
+		reconciledScores.flatMap(({ key }) => cids.map(cid => `cid:${cid}:${key}`)),
+		topicData.tid
+	);
 
-	const postcounts = scores.slice(0, count);
-	const votes = scores.slice(count, count * 2);
-	const viewcounts = scores.slice(count * 2);
-
+	// Scores come back in request order — all post counts, then all vote counts, then all
+	// view counts — so a field's block starts at `fieldIndex * cids.length`.
 	const bulkAdd = [];
-	cids.forEach((cid, index) => {
-		if (topicData.postcount !== postcounts[index]) {
-			bulkAdd.push([`cid:${cid}:tids:posts`, topicData.postcount, topicData.tid]);
-		}
-		if (topicData.votes !== votes[index]) {
-			bulkAdd.push([`cid:${cid}:tids:votes`, topicData.votes, topicData.tid]);
-		}
-		if (topicData.viewcount !== viewcounts[index]) {
-			bulkAdd.push([`cid:${cid}:tids:views`, topicData.viewcount, topicData.tid]);
-		}
+	cids.forEach((cid, cidIndex) => {
+		reconciledScores.forEach(({ key, field }, fieldIndex) => {
+			const currentScore = scores[(fieldIndex * cids.length) + cidIndex];
+			if (topicData[field] !== currentScore) {
+				bulkAdd.push([`cid:${cid}:${key}`, topicData[field], topicData.tid]);
+			}
+		});
 	});
 
 	if (bulkAdd.length) {
@@ -130,62 +159,70 @@ Crossposts.add = async function (tid, cid, uid) {
 
 	const crossposts = await Crossposts.get(tid);
 	const crosspostedCids = crossposts.map(crosspost => String(crosspost.cid));
-	const now = Date.now();
-	const crosspostId = utils.generateUUID();
-	if (!crosspostedCids.includes(cid)) {
-		const [topicData, pids, tags] = await Promise.all([
-			topics.getTopicFields(tid, [
-				'uid', 'cid', 'timestamp', 'lastposttime', 'pinned',
-				'postcount', 'viewcount', 'upvotes', 'downvotes',
-			]),
-			topics.getPids(tid),
-			topics.getTopicTags(tid),
-		]);
-		const pidTimestamps = (await posts.getPostsFields(pids, ['timestamp']))
-			.map(({ timestamp }) => timestamp);
-
-		if (cid === String(topicData.cid)) {
-			throw new Error('[[error:invalid-cid]]');
-		}
-
-		// Scores are derived from topic data, not copied from the source category's
-		// sorted sets — a pinned topic is absent from those sets, and copying a null
-		// score throws (`[[error:invalid-score, null]]`)
-		const votes = (parseInt(topicData.upvotes, 10) || 0) - (parseInt(topicData.downvotes, 10) || 0);
-		const bulkAdd = [
-			[`cid:${cid}:tids:lastposttime`, topicData.lastposttime, tid],
-			[`cid:${cid}:uid:${topicData.uid}:tids`, topicData.timestamp, tid],
-			...tags.map(tag => [`cid:${cid}:tag:${tag}:topics`, topicData.timestamp, tid]),
-		];
-		if (topicData.pinned) {
-			bulkAdd.push([`cid:${cid}:tids:pinned`, now, tid]);
-		} else {
-			bulkAdd.push([`cid:${cid}:tids`, topicData.lastposttime, tid]);
-			bulkAdd.push([`cid:${cid}:tids:create`, topicData.timestamp, tid]);
-			bulkAdd.push([`cid:${cid}:tids:posts`, topicData.postcount || 0, tid]);
-			bulkAdd.push([`cid:${cid}:tids:votes`, votes, tid]);
-			bulkAdd.push([`cid:${cid}:tids:views`, topicData.viewcount || 0, tid]);
-		}
-
-		await Promise.all([
-			db.sortedSetAddBulk(bulkAdd),
-			db.sortedSetAdd(`cid:${cid}:pids`, pidTimestamps, pids),
-			db.setObject(`crosspost:${crosspostId}`, { uid, tid, cid, timestamp: now }),
-			db.sortedSetAdd(`tid:${tid}:crossposts`, now, crosspostId),
-			uid > 0 ? db.sortedSetAdd(`uid:${uid}:crossposts`, now, crosspostId) : false,
-			topics.events.log(tid, { uid, type: 'crosspost', toCid: cid }),
-		]);
-		await Promise.all([
-			topics.updateCategoryTagsCount([cid], tags),
-			categories.onTopicsMoved([cid]), // must be done after
-		]);
-	} else {
+	if (crosspostedCids.includes(cid)) {
 		throw new Error('[[error:topic-already-crossposted]]');
 	}
+
+	const now = Date.now();
+	const crosspostId = utils.generateUUID();
+	const [topicData, pids, tags] = await Promise.all([
+		topics.getTopicFields(tid, [
+			'uid', 'cid', 'timestamp', 'lastposttime', 'pinned',
+			'postcount', 'viewcount', 'upvotes', 'downvotes',
+		]),
+		topics.getPids(tid),
+		topics.getTopicTags(tid),
+	]);
+	const pidTimestamps = (await posts.getPostsFields(pids, ['timestamp']))
+		.map(({ timestamp }) => timestamp);
+
+	if (cid === String(topicData.cid)) {
+		throw new Error('[[error:invalid-cid]]');
+	}
+
+	// Scores are derived from topic data, not copied from the source category's
+	// sorted sets — a pinned topic is absent from those sets, and copying a null
+	// score throws (`[[error:invalid-score, null]]`)
+	const votes = (parseInt(topicData.upvotes, 10) || 0) - (parseInt(topicData.downvotes, 10) || 0);
+	const bulkAdd = [
+		[`cid:${cid}:tids:lastposttime`, topicData.lastposttime, tid],
+		[`cid:${cid}:uid:${topicData.uid}:tids`, topicData.timestamp, tid],
+		...tags.map(tag => [`cid:${cid}:tag:${tag}:topics`, topicData.timestamp, tid]),
+	];
+	if (topicData.pinned) {
+		bulkAdd.push([`cid:${cid}:tids:pinned`, now, tid]);
+	} else {
+		bulkAdd.push([`cid:${cid}:tids`, topicData.lastposttime, tid]);
+		bulkAdd.push([`cid:${cid}:tids:create`, topicData.timestamp, tid]);
+		bulkAdd.push([`cid:${cid}:tids:posts`, topicData.postcount || 0, tid]);
+		bulkAdd.push([`cid:${cid}:tids:votes`, votes, tid]);
+		bulkAdd.push([`cid:${cid}:tids:views`, topicData.viewcount || 0, tid]);
+	}
+
+	await Promise.all([
+		db.sortedSetAddBulk(bulkAdd),
+		db.sortedSetAdd(`cid:${cid}:pids`, pidTimestamps, pids),
+		db.setObject(`crosspost:${crosspostId}`, { uid, tid, cid, timestamp: now }),
+		db.sortedSetAdd(`tid:${tid}:crossposts`, now, crosspostId),
+		uid > 0 ? db.sortedSetAdd(`uid:${uid}:crossposts`, now, crosspostId) : false,
+		topics.events.log(tid, { uid, type: 'crosspost', toCid: cid }),
+	]);
+	await Promise.all([
+		topics.updateCategoryTagsCount([cid], tags),
+		categories.onTopicsMoved([cid]), // must be done after
+	]);
 
 	return [...crossposts, { id: crosspostId, uid, tid, cid, timestamp: now }];
 };
 
+/**
+ * Add a pending crosspost to the post queue instead of creating it immediately.
+ *
+ * @param {string|number} tid
+ * @param {string|number} cid Destination cid
+ * @param {string|number} uid Actor requesting the crosspost
+ * @returns {Promise<void>}
+ */
 Crossposts.queue = async function (tid, cid, uid) {
 	if (!meta.config.postQueue) {
 		return;
@@ -217,11 +254,11 @@ Crossposts.remove = async function (tid, cid, uid) {
 		user.isAdminOrGlobalMod(uid),
 		user.isModerator(uid, cid),
 	]);
-	const crosspostId = crossposts.reduce((id, { id: crosspost, cid: crosspostCid, uid: crosspostUid }) => {
+	const crosspostId = crossposts.findLast(({ cid: crosspostCid, uid: crosspostUid }) => {
 		const sameCid = cid === String(crosspostCid);
 		const canRemove = isPrivileged || isMod || String(uid) === String(crosspostUid);
-		return sameCid && canRemove ? crosspost : id;
-	}, null);
+		return sameCid && canRemove;
+	})?.id;
 	if (!crosspostId) {
 		throw new Error('[[error:invalid-data]]');
 	}
@@ -230,8 +267,8 @@ Crossposts.remove = async function (tid, cid, uid) {
 		topics.getTopicFields(tid, ['uid', 'tags']),
 		topics.getPids(tid),
 	]);
-	const tags = topicData.tags.map(t => t.value);
-	let bulkRemove = [
+	const tags = topicData.tags.map(tag => tag.value);
+	const bulkRemove = [
 		`cid:${cid}:tids`,
 		`cid:${cid}:tids:create`,
 		`cid:${cid}:tids:lastposttime`,
@@ -241,8 +278,7 @@ Crossposts.remove = async function (tid, cid, uid) {
 		`cid:${cid}:tids:posts`,
 		`cid:${cid}:tids:views`,
 		...tags.map(tag => `cid:${cid}:tag:${tag}:topics`),
-	];
-	bulkRemove = bulkRemove.map(zset => [zset, tid]);
+	].map(zset => [zset, tid]);
 
 	await Promise.all([
 		db.sortedSetRemoveBulk(bulkRemove),
@@ -263,15 +299,21 @@ Crossposts.remove = async function (tid, cid, uid) {
 	return await Crossposts.get(tid);
 };
 
+/**
+ * Remove every crosspost belonging to the given topics.
+ *
+ * @param {string|number|Array<string|number>} tids A tid, or an array of tids
+ * @returns {Promise<void>}
+ */
 Crossposts.removeAll = async function (tids) {
 	if (!Array.isArray(tids)) {
 		tids = [tids];
 	}
-	const allCrosspostIds = (await db.getSortedSetsMembers(
+	const crosspostIds = (await db.getSortedSetsMembers(
 		tids.map(tid => `tid:${tid}:crossposts`)
 	)).flat();
 	const crossposts = (await db.getObjects(
-		allCrosspostIds.map(id => `crosspost:${id}`)
+		crosspostIds.map(id => `crosspost:${id}`)
 	)).filter(Boolean);
 
 	await Promise.all(
