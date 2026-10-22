@@ -7,6 +7,14 @@ define('search', [
 		current: {},
 	};
 
+	const IN_TOPIC_PREFIX_REGEX = /^in:topic-\S+/;
+	const WEBFINGER_REGEX = /^(@|acct:)?[\p{L}\p{N}\p{M}_.-]+@.+$/u;
+
+	/**
+	 * Initialize search event listeners on form elements.
+	 *
+	 * @param {object} [searchOptions] Default search options
+	 */
 	Search.init = function (searchOptions) {
 		if (!config.searchEnabled) {
 			return;
@@ -19,6 +27,12 @@ define('search', [
 		});
 	};
 
+	/**
+	 * Attach event listeners to a specific search form.
+	 *
+	 * @param {jQuery} searchForm Search form jQuery element
+	 * @param {object} searchOptions Search configuration options
+	 */
 	function init(searchForm, searchOptions) {
 		const searchButton = searchForm.find('[component="search/button"]');
 		const searchFields = searchForm.find('[component="search/fields"]');
@@ -26,7 +40,6 @@ define('search', [
 
 		const quickSearchContainer = searchFields.find('#quick-search-container');
 		const toggleVisibility = searchFields.hasClass('hidden');
-		const webfingerRegex = /^(@|acct:)?[\p{L}\p{N}\p{M}_.-]+@.+$/u;
 
 		if (toggleVisibility) {
 			searchFields.off('focusout').on('focusout', function dismissSearch() {
@@ -73,7 +86,7 @@ define('search', [
 			data.in = searchOptions.in;
 
 			// Override search target if webfinger handle entered
-			if (webfingerRegex.test(data.term)) {
+			if (WEBFINGER_REGEX.test(data.term)) {
 				data.in = 'users';
 			}
 
@@ -90,6 +103,11 @@ define('search', [
 		});
 	}
 
+	/**
+	 * Set up quick search dropdown preview on input elements.
+	 *
+	 * @param {object} options Options including searchElements and searchOptions
+	 */
 	Search.enableQuickSearch = function (options) {
 		if (!config.searchEnabled || !app.user.privileges['search:content']) {
 			return;
@@ -157,7 +175,7 @@ define('search', [
 					}
 					data.posts.forEach(function (p) {
 						const text = $('<div>' + p.content + '</div>').text();
-						const query = inputEl.val().toLowerCase().replace(/^in:topic-\S+/, '');
+						const query = inputEl.val().toLowerCase().replace(IN_TOPIC_PREFIX_REGEX, '');
 						const start = Math.max(0, text.toLowerCase().indexOf(query) - 40);
 						p.snippet = utils.escapeHTML((start > 0 ? '...' : '') +
 							text.slice(start, start + 80) +
@@ -254,6 +272,11 @@ define('search', [
 		});
 	};
 
+	/**
+	 * Reveal and focus the search input field within a search form or dropdown.
+	 *
+	 * @param {jQuery} form Search form jQuery element
+	 */
 	Search.showAndFocusInput = function (form) {
 		const parentDropdown = form.parents('.dropdown-menu');
 		if (parentDropdown.length) { // handle if form is inside a dropdown aka harmony
@@ -269,14 +292,26 @@ define('search', [
 		}
 	};
 
+	/**
+	 * Navigate to the search results page via ajaxify.
+	 *
+	 * @param {object} data Query parameters
+	 * @param {Function} [callback] Callback executed after navigation
+	 */
 	Search.query = function (data, callback) {
 		callback = callback || function () {};
 		ajaxify.go('search?' + createQueryString(data), callback);
 	};
 
+	/**
+	 * Perform search API request and execute callback with results.
+	 *
+	 * @param {object} data Query parameters
+	 * @param {Function} callback Callback receiving results
+	 */
 	Search.api = function (data, callback) {
 		const apiURL = config.relative_path + '/api/search?' + createQueryString(data);
-		if (data.hasOwnProperty('searchOnly')) {
+		if (Object.hasOwn(data, 'searchOnly')) {
 			delete data.searchOnly;
 		}
 		const searchURL = config.relative_path + '/search?' + createQueryString(data);
@@ -286,6 +321,12 @@ define('search', [
 		});
 	};
 
+	/**
+	 * Build URL query string from search options.
+	 *
+	 * @param {object} data Search parameters
+	 * @returns {string} URL-encoded query string
+	 */
 	function createQueryString(data) {
 		const searchIn = data.in || 'titles';
 		const term = data.term.replace(/^[ ?#]*/, '');
@@ -304,6 +345,11 @@ define('search', [
 		return $.param(query);
 	}
 
+	/**
+	 * Read stored search preferences from local storage.
+	 *
+	 * @returns {object} Parsed preferences object
+	 */
 	Search.getSearchPreferences = function () {
 		try {
 			return JSON.parse(storage.getItem('search-preferences') || '{}');
@@ -313,6 +359,12 @@ define('search', [
 		}
 	};
 
+	/**
+	 * Highlight search query matches within container elements.
+	 *
+	 * @param {string} searchQuery Search query term
+	 * @param {jQuery} els Elements to highlight within
+	 */
 	Search.highlightMatches = function (searchQuery, els) {
 		if (!searchQuery || !els.length) {
 			return;
@@ -320,7 +372,7 @@ define('search', [
 		searchQuery = utils.escapeHTML(searchQuery.replace(/^"/, '').replace(/"$/, '').trim());
 		const regexStr = searchQuery.split(' ')
 			.filter(word => word.length > 1)
-			.map(function (word) { return utils.escapeRegexChars(word); })
+			.map(word => utils.escapeRegexChars(word))
 			.join('|');
 		const regex = new RegExp('(' + regexStr + ')', 'gi');
 

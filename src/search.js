@@ -15,6 +15,15 @@ const utils = require('./utils');
 
 const search = module.exports;
 
+const IN_TOPIC_REGEX = /^in:topic-(\S+) /;
+const CONTENT_SEARCH_IN = ['posts', 'titles', 'titlesposts', 'bookmarks'];
+
+/**
+ * Execute a search request across posts, topics, users, categories, or tags.
+ *
+ * @param {object} data Search parameters including query, searchIn, sortBy, etc.
+ * @returns {Promise<object>} Search results object with matchCount, timing, and items.
+ */
 search.search = async function (data) {
 	const start = process.hrtime();
 	data.sortBy = data.sortBy || 'relevance';
@@ -37,7 +46,7 @@ search.search = async function (data) {
 		}
 
 		default: {
-			if (['posts', 'titles', 'titlesposts', 'bookmarks'].includes(data.searchIn)) {
+			if (CONTENT_SEARCH_IN.includes(data.searchIn)) {
 				result = await searchInContent(data);
 			} else if (data.searchIn) {
 				result = await plugins.hooks.fire('filter:search.searchIn', {
@@ -53,6 +62,12 @@ search.search = async function (data) {
 	return result;
 };
 
+/**
+ * Perform a content-based search across posts, titles, or bookmarks.
+ *
+ * @param {object} data Search request options
+ * @returns {Promise<object>} Content search result with posts array and pagination metadata
+ */
 async function searchInContent(data) {
 	data.uid = data.uid || 0;
 
@@ -78,7 +93,7 @@ async function searchInContent(data) {
 	}
 	let pids;
 	let tids = [];
-	const inTopic = String(data.query || '').match(/^in:topic-([\S]+) /);
+	const inTopic = String(data.query || '').match(IN_TOPIC_REGEX);
 	if (inTopic) {
 		const tid = inTopic[1];
 		const cleanedTerm = data.query.replace(inTopic[0], '');
@@ -94,11 +109,11 @@ async function searchInContent(data) {
 			} else {
 				try {
 					result = await fetchRemoteObject(data);
-					if (result.hasOwnProperty('users')) {
+					if (result && Object.hasOwn(result, 'users')) {
 						return result;
 					}
-				} catch (e) {
-					// ...
+				} catch {
+					// Ignored: remote lookup failures fall back to local search
 				}
 			}
 		}
@@ -122,7 +137,7 @@ async function searchInContent(data) {
 
 	const metadata = await plugins.hooks.fire('filter:search.inContent', {
 		pids: allPids,
-		data: data,
+		data,
 	});
 
 	if (data.returnIds) {
@@ -138,7 +153,7 @@ async function searchInContent(data) {
 	const returnData = {
 		posts: [],
 		matchCount: metadata.pids.length,
-		pageCount: Math.max(1, Math.ceil(parseInt(metadata.pids.length, 10) / itemsPerPage)),
+		pageCount: Math.max(1, Math.ceil(metadata.pids.length / itemsPerPage)),
 	};
 
 	if (data.page) {
@@ -149,12 +164,18 @@ async function searchInContent(data) {
 	returnData.posts = await posts.getPostSummaryByPids(metadata.pids, data.uid, {
 		extraFields: ['attachments'],
 	});
-	await plugins.hooks.fire('filter:search.contentGetResult', { result: returnData, data: data });
+	await plugins.hooks.fire('filter:search.contentGetResult', { result: returnData, data });
 	delete metadata.pids;
 	delete metadata.data;
 	return Object.assign(returnData, metadata);
 }
 
+/**
+ * Fetch and assert an ActivityPub remote object for search queries matching a URI.
+ *
+ * @param {object} data Search parameters containing uid and query URI
+ * @returns {Promise<Array<string[]>|object|null>} Resolved pids/tids pair, user search result, or null
+ */
 async function fetchRemoteObject(data) {
 	const { uid, query: uri } = data;
 
@@ -182,11 +203,19 @@ async function fetchRemoteObject(data) {
 		}
 
 		return tid ? [[id], []] : null;
-	} catch (e) {
+	} catch {
 		return null;
 	}
 }
 
+/**
+ * Search inside user's bookmarked posts.
+ *
+ * @param {object} data Search parameters containing uid, query, and matchWords
+ * @param {Array<number|string>} searchCids Category IDs to filter by
+ * @param {Array<number|string>} searchUids User IDs to filter by
+ * @returns {Promise<Array<number|string>>} Matching post IDs
+ */
 async function searchInBookmarks(data, searchCids, searchUids) {
 	const { uid, query, matchWords } = data;
 	const allPids = [];
@@ -205,7 +234,7 @@ async function searchInBookmarks(data, searchCids, searchUids) {
 			const tidToTopic = _.zipObject(tids, topicData);
 			pids = pids.filter((pid, i) => {
 				const content = String(postData[i].content);
-				const title = String(tidToTopic[postData[i].tid].title);
+				const title = String(tidToTopic[postData[i].tid]?.title || '');
 				const method = (matchWords === 'any' ? 'some' : 'every');
 				return tokens[method](
 					token => content.includes(token) || title.includes(token)
@@ -220,6 +249,13 @@ async function searchInBookmarks(data, searchCids, searchUids) {
 	return allPids;
 }
 
+/**
+ * Apply filters (post count, time range, tags) and sorting to a list of post IDs.
+ *
+ * @param {Array<number|string>} pids Post IDs
+ * @param {object} data Filter and sort criteria
+ * @returns {Promise<Array<number|string>>} Filtered and sorted post IDs
+ */
 async function filterAndSort(pids, data) {
 	if (data.sortBy === 'relevance' &&
 		!data.replies &&
@@ -241,10 +277,17 @@ async function filterAndSort(pids, data) {
 
 	sortPosts(postsData, data);
 
-	const result = await plugins.hooks.fire('filter:search.filterAndSort', { pids: pids, posts: postsData, data: data });
+	const result = await plugins.hooks.fire('filter:search.filterAndSort', { pids, posts: postsData, data });
 	return result.posts.map(post => post && post.pid);
 }
 
+/**
+ * Fetch hydrated post, topic, and category data for filtering and sorting.
+ *
+ * @param {Array<number|string>} pids Post IDs
+ * @param {object} data Search parameters
+ * @returns {Promise<object[]>} Hydrated post objects
+ */
 async function getMatchedPosts(pids, data) {
 	const postFields = ['pid', 'uid', 'tid', 'timestamp', 'deleted', 'upvotes', 'downvotes'];
 
@@ -276,6 +319,13 @@ async function getMatchedPosts(pids, data) {
 	return postsData.filter(post => post && post.topic && !post.topic.deleted);
 }
 
+/**
+ * Fetch username data for posts when sorting by user.
+ *
+ * @param {Array<number|string>} uids User IDs
+ * @param {object} data Search parameters
+ * @returns {Promise<object[]>} Users list
+ */
 async function getUsers(uids, data) {
 	if (data.sortBy.startsWith('user')) {
 		return user.getUsersFields(uids, ['username']);
@@ -283,6 +333,13 @@ async function getUsers(uids, data) {
 	return [];
 }
 
+/**
+ * Fetch topic objects with associated categories and normalized tags.
+ *
+ * @param {Array<number|string>} tids Topic IDs
+ * @param {object} data Search parameters
+ * @returns {Promise<object[]>} Hydrated topic objects
+ */
 async function getTopics(tids, data) {
 	const topicsData = await topics.getTopicsData(tids);
 	const cids = _.uniq(topicsData.map(topic => topic && topic.cid));
@@ -301,6 +358,13 @@ async function getTopics(tids, data) {
 	return topicsData;
 }
 
+/**
+ * Fetch category fields required for category-based sorting.
+ *
+ * @param {Array<number|string>} cids Category IDs
+ * @param {object} data Search parameters
+ * @returns {Promise<object[]|null>} Category objects or null
+ */
 async function getCategories(cids, data) {
 	const categoryFields = [];
 
@@ -314,6 +378,14 @@ async function getCategories(cids, data) {
 	return await db.getObjectsFields(cids.map(cid => `category:${cid}`), categoryFields);
 }
 
+/**
+ * Filter posts by topic reply count.
+ *
+ * @param {object[]} posts Post objects
+ * @param {number|string} postCount Minimum or maximum reply count
+ * @param {string} repliesFilter 'atleast' or 'atmost'
+ * @returns {object[]} Filtered post objects
+ */
 function filterByPostcount(posts, postCount, repliesFilter) {
 	postCount = parseInt(postCount, 10);
 	if (postCount) {
@@ -326,6 +398,14 @@ function filterByPostcount(posts, postCount, repliesFilter) {
 	return posts;
 }
 
+/**
+ * Filter posts by timestamp range.
+ *
+ * @param {object[]} posts Post objects
+ * @param {number|string} timeRange Duration in seconds
+ * @param {string} timeFilter 'newer' or 'older'
+ * @returns {object[]} Filtered post objects
+ */
 function filterByTimerange(posts, timeRange, timeFilter) {
 	timeRange = parseInt(timeRange, 10) * 1000;
 	if (timeRange) {
@@ -339,19 +419,29 @@ function filterByTimerange(posts, timeRange, timeFilter) {
 	return posts;
 }
 
+/**
+ * Filter posts by required topic tags.
+ *
+ * @param {object[]} posts Post objects
+ * @param {string[]} hasTags Array of required tag strings
+ * @returns {object[]} Filtered post objects
+ */
 function filterByTags(posts, hasTags) {
 	if (Array.isArray(hasTags) && hasTags.length) {
-		posts = posts.filter((post) => {
-			let hasAllTags = false;
-			if (post && post.topic && Array.isArray(post.topic.tags) && post.topic.tags.length) {
-				hasAllTags = hasTags.every(tag => post.topic.tags.includes(tag));
-			}
-			return hasAllTags;
-		});
+		return posts.filter(post =>
+			Array.isArray(post?.topic?.tags) &&
+			hasTags.every(tag => post.topic.tags.includes(tag))
+		);
 	}
 	return posts;
 }
 
+/**
+ * In-place sort post objects by relevance, timestamp, numeric or string field.
+ *
+ * @param {object[]} posts Post objects to sort
+ * @param {object} data Search parameters including sortBy and sortDirection
+ */
 function sortPosts(posts, data) {
 	if (!posts.length || data.sortBy === 'relevance') {
 		return;
@@ -364,20 +454,23 @@ function sortPosts(posts, data) {
 		return posts.sort((p1, p2) => direction * (p2[fields[0]] - p1[fields[0]]));
 	}
 
+	const [rootField, subField] = fields;
 	const firstPost = posts[0];
-	if (!fields || fields.length !== 2 || !firstPost[fields[0]] || !firstPost[fields[0]][fields[1]]) {
+	if (!fields || fields.length !== 2 || !firstPost[rootField] || !firstPost[rootField][subField]) {
 		return;
 	}
 
-	const isNumeric = utils.isNumber(firstPost[fields[0]][fields[1]]);
+	const isNumeric = utils.isNumber(firstPost[rootField][subField]);
 
 	if (isNumeric) {
-		posts.sort((p1, p2) => direction * (p2[fields[0]][fields[1]] - p1[fields[0]][fields[1]]));
+		posts.sort((p1, p2) => direction * (p2[rootField][subField] - p1[rootField][subField]));
 	} else {
 		posts.sort((p1, p2) => {
-			if (p1[fields[0]][fields[1]] > p2[fields[0]][fields[1]]) {
+			const val1 = p1[rootField]?.[subField];
+			const val2 = p2[rootField]?.[subField];
+			if (val1 > val2) {
 				return -direction;
-			} else if (p1[fields[0]][fields[1]] < p2[fields[0]][fields[1]]) {
+			} else if (val1 < val2) {
 				return direction;
 			}
 			return 0;
@@ -385,6 +478,12 @@ function sortPosts(posts, data) {
 	}
 }
 
+/**
+ * Resolve target category IDs including watched categories and child categories.
+ *
+ * @param {object} data Search parameters
+ * @returns {Promise<Array<number|string>>} List of category IDs
+ */
 async function getSearchCids(data) {
 	if (!Array.isArray(data.categories) || !data.categories.length) {
 		return [];
@@ -401,6 +500,12 @@ async function getSearchCids(data) {
 	return _.uniq(watchedCids.concat(childrenCids).concat(data.categories).filter(Boolean));
 }
 
+/**
+ * Resolve watched category IDs for the user.
+ *
+ * @param {object} data Search parameters containing uid and categories
+ * @returns {Promise<Array<number|string>>} Watched category IDs
+ */
 async function getWatchedCids(data) {
 	if (!data.categories.includes('watched')) {
 		return [];
@@ -408,6 +513,12 @@ async function getWatchedCids(data) {
 	return await user.getWatchedCategories(data.uid);
 }
 
+/**
+ * Resolve accessible child category IDs when searchChildren is enabled.
+ *
+ * @param {object} data Search parameters containing categories, uid, and searchChildren
+ * @returns {Promise<Array<number|string>>} Filtered child category IDs
+ */
 async function getChildrenCids(data) {
 	if (!data.searchChildren) {
 		return [];
@@ -420,6 +531,12 @@ async function getChildrenCids(data) {
 	);
 }
 
+/**
+ * Resolve author user IDs from postedBy search parameter.
+ *
+ * @param {object} data Search parameters containing postedBy
+ * @returns {Promise<number[]>} User IDs
+ */
 async function getSearchUids(data) {
 	if (!data.postedBy) {
 		return [];
