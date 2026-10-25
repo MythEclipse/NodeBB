@@ -38,22 +38,28 @@ const als = require('./als');
 const app = express();
 
 app.renderAsync = async (tpl, data) => {
-	let renderData = data;
-	if (!Object.hasOwn(data, '_i18n')) {
-		const store = als.getStore();
-		if (!store) {
-			const stack = new Error().stack.split('\n')[2];
-			winston.warn(`[app.renderAsync] No ALS store found, unable to determine user language for template rendering, using default language instead. Template: ${tpl}\n${stack}`);
-		}
-		const uid = store?.uid || 0;
-		const { userLang, acpLang } = await user.getSettings(uid);
-		renderData = {
-			...renderData,
-			_i18n: languages.getFull(tpl.startsWith('admin/') ? acpLang : userLang),
-		};
+	if (Object.hasOwn(data, '_i18n')) {
+		return new Promise((resolve, reject) => {
+			app.render(tpl, data, (err, html) => {
+				if (err) return reject(err);
+				resolve(html);
+			});
+		});
 	}
+
+	const store = als.getStore();
+	if (!store) {
+		const stack = new Error().stack.split('\n').slice(2).join('\n');
+		winston.warn(`[app.renderAsync] No ALS store found, unable to determine user language for template rendering, using default language instead. Template: ${tpl}\n${stack}`);
+	}
+	const uid = store?.uid || 0;
+	const { userLang, acpLang } = await user.getSettings(uid);
+
 	return new Promise((resolve, reject) => {
-		app.render(tpl, renderData, (err, html) => {
+		app.render(tpl, {
+			...data,
+			_i18n: languages.getFull(tpl.startsWith('admin/') ? acpLang : userLang),
+		}, (err, html) => {
 			if (err) return reject(err);
 			resolve(html);
 		});
@@ -105,9 +111,7 @@ exports.destroy = function () {
 	});
 };
 
-exports.getConnectionCount = function () {
-	return Object.keys(connections).length;
-};
+exports.getConnectionCount = () => Object.keys(connections).length;
 
 exports.listen = async function () {
 	emailer.registerApp(app);
@@ -214,7 +218,6 @@ function setupExpressApp(app) {
 	app.use(middleware.addHeaders);
 	app.use(middleware.processRender);
 	auth.initialize(app, middleware);
-	const als = require('./als');
 	const apiHelpers = require('./api/helpers');
 	app.use((req, res, next) => {
 		als.run({
@@ -224,8 +227,12 @@ function setupExpressApp(app) {
 	});
 
 	const toobusy = require('toobusy-js');
-	toobusy.maxLag(meta.config.eventLoopLagThreshold);
-	toobusy.interval(meta.config.eventLoopInterval);
+	try {
+		toobusy.maxLag(meta.config.eventLoopLagThreshold);
+		toobusy.interval(meta.config.eventLoopInterval);
+	} catch (err) {
+		winston.warn(`[setupExpressApp] unable to configure toobusy: ${err.message}`);
+	}
 }
 
 function setupHelmet(app) {
@@ -346,30 +353,29 @@ async function listen() {
 		}
 	}
 
-	return new Promise((resolve, reject) => {
-		server.listen(...args.concat([function (err) {
+	server.listen(...args, (err) => {
+		if (err) {
 			const onText = `${isSocket ? socketPath : `${bind_address}:${port}`}`;
-			if (err) {
-				winston.error(`[startup] NodeBB was unable to listen on: ${chalk.yellow(onText)}`);
-				reject(err);
-			}
+			winston.error(`[startup] NodeBB was unable to listen on: ${chalk.yellow(onText)}`);
+			reject(err);
+			return;
+		}
 
-			winston.info(`📡 NodeBB is now listening on: ${chalk.yellow(onText)}`);
-			winston.info(`🔗 Canonical URL: ${chalk.yellow(nconf.get('url'))}`);
-			if (oldUmask) {
-				process.umask(oldUmask);
-			}
-			resolve();
-		}]));
+		const onText = `${isSocket ? socketPath : `${bind_address}:${port}`}`;
+		winston.info(`📡 NodeBB is now listening on: ${chalk.yellow(onText)}`);
+		winston.info(`🔗 Canonical URL: ${chalk.yellow(nconf.get('url'))}`);
+		if (oldUmask) {
+			process.umask(oldUmask);
+		}
+		resolve();
 	});
 }
 
 exports.testSocket = async function (socketPath) {
 	if (typeof socketPath !== 'string') {
-		throw new Error(`invalid socket path : ${socketPath}`);
+		throw new Error(`invalid socket path: ${socketPath}`);
 	}
 	const net = require('net');
-	const file = require('./file');
 	const exists = await file.exists(socketPath);
 	if (!exists) {
 		return;
@@ -382,7 +388,8 @@ exports.testSocket = async function (socketPath) {
 			}
 			// The socket was stale, kick it out of the way
 			fs.unlink(socketPath, (err) => {
-				if (err) reject(err); else resolve();
+				if (err) reject(err);
+				else resolve();
 			});
 		});
 		testSocket.connect({ path: socketPath }, () => {
