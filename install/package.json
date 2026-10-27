@@ -6,7 +6,7 @@
     "homepage": "https://www.nodebb.org",
     "repository": {
         "type": "git",
-        "url": "https://github.com/NodeBB/NodeBB/"
+        "url": "git+https://github.com/NodeBB/NodeBB.git"
     },
     "main": "app.js",
     "scripts": {
