@@ -1,6 +1,9 @@
 'use strict';
 
 module.exports = function (module) {
+	// Explicit hints keep mongo on the index that matches the query shape.
+	const hintKeyValue = { _key: 1, value: -1 };
+
 	module.sortedSetUnionCard = async function (keys) {
 		if (!Array.isArray(keys) || !keys.length) {
 			return 0;
@@ -11,7 +14,7 @@ module.exports = function (module) {
 			{ $group: { _id: { value: '$value' } } },
 			{ $group: { _id: null, count: { $sum: 1 } } },
 		], {
-			hint: { _key: 1, value: -1 },
+			hint: hintKeyValue,
 		}).toArray();
 		return Array.isArray(data) && data.length ? data[0].count : 0;
 	};
@@ -26,6 +29,12 @@ module.exports = function (module) {
 		return await getSortedSetUnion(params);
 	};
 
+	/**
+	 * Unions the given sets, summing (or aggregating) the scores of shared
+	 * members, then pages over the result.
+	 * @param {object} params see `types/database/zset.d.ts`
+	 * @returns {Promise<Array>}
+	 */
 	async function getSortedSetUnion(params) {
 		if (!Array.isArray(params.sets) || !params.sets.length) {
 			return [];
@@ -63,7 +72,7 @@ module.exports = function (module) {
 		pipeline.push({ $project: project });
 
 		let data = await module.client.collection('objects').aggregate(pipeline, {
-			hint: { _key: 1, value: -1 },
+			hint: hintKeyValue,
 		}).toArray();
 		if (!params.withScores) {
 			data = data.map(item => item.value);

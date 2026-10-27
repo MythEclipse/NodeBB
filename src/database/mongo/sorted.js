@@ -9,6 +9,7 @@ module.exports = function (module) {
 	const util = require('util');
 	const sleep = util.promisify(setTimeout);
 
+	// Explicit hints keep mongo on the index that matches the query shape.
 	const hintKeyScore = { _key: 1, score: -1 };
 	const hintKeyValue = { _key: 1, value: -1 };
 
@@ -33,6 +34,17 @@ module.exports = function (module) {
 		return await getSortedSetRange(key, start, stop, '-inf', '+inf', -1, true);
 	};
 
+	/**
+	 * Shared implementation of the range getters.
+	 * @param {string|string[]} key one key, or several to merge
+	 * @param {number} start zero-based offset, negative values count from the end
+	 * @param {number} stop inclusive end offset, -1 means "until the end"
+	 * @param {string|number} min inclusive minimum score, '-inf' for none
+	 * @param {string|number} max inclusive maximum score, '+inf' for none
+	 * @param {number} sort 1 for ascending, -1 for descending
+	 * @param {boolean} withScores whether to return `{ value, score }` objects
+	 * @returns {Promise<Array|undefined>}
+	 */
 	async function getSortedSetRange(key, start, stop, min, max, sort, withScores) {
 		if (!key) {
 			return;
@@ -85,10 +97,10 @@ module.exports = function (module) {
 		}
 
 		let result;
-		async function doQuery(_key, fields, skip, limit) {
+		async function doQuery(keyFilter, projection, skip, limit) {
 			return await module.client.collection('objects').find({
-				...query, ...{ _key: _key },
-			}, { projection: fields })
+				...query, _key: keyFilter,
+			}, { projection })
 				.sort({ score: sort })
 				.skip(skip)
 				.limit(limit)
@@ -138,6 +150,18 @@ module.exports = function (module) {
 		return await getSortedSetRangeByScore(key, start, count, min, max, -1, true);
 	};
 
+	/**
+	 * Translates a `count` into an inclusive stop offset and delegates to the
+	 * shared range getter.
+	 * @param {string|string[]} key
+	 * @param {number} start
+	 * @param {number} count -1 means "until the end"
+	 * @param {string|number} min
+	 * @param {string|number} max
+	 * @param {number} sort 1 for ascending, -1 for descending
+	 * @param {boolean} withScores
+	 * @returns {Promise<Array|undefined>}
+	 */
 	async function getSortedSetRangeByScore(key, start, count, min, max, sort, withScores) {
 		if (parseInt(count, 10) === 0) {
 			return [];
@@ -209,6 +233,12 @@ module.exports = function (module) {
 		return await getSortedSetRank(true, key, value);
 	};
 
+	/**
+	 * @param {boolean} reverse count members ranked after instead of before
+	 * @param {string} key
+	 * @param {string|number} value
+	 * @returns {Promise<number|null|undefined>} rank, or null if the member is absent
+	 */
 	async function getSortedSetRank(reverse, key, value) {
 		if (!key) {
 			return;
@@ -242,16 +272,18 @@ module.exports = function (module) {
 		return await sortedSetsRanks(module.sortedSetRevRank, keys, values);
 	};
 
+	/**
+	 * Resolves one rank per `keys[i]`/`values[i]` pair.
+	 * @param {Function} method `sortedSetRank` or `sortedSetRevRank`
+	 * @param {string[]} keys
+	 * @param {Array<string|number>} values
+	 * @returns {Promise<Array<number|null|undefined>>}
+	 */
 	async function sortedSetsRanks(method, keys, values) {
 		if (!Array.isArray(keys) || !keys.length) {
 			return [];
 		}
-		const data = new Array(values.length);
-		for (let i = 0; i < values.length; i += 1) {
-			data[i] = { key: keys[i], value: values[i] };
-		}
-		const promises = data.map(item => method(item.key, item.value));
-		return await Promise.all(promises);
+		return await Promise.all(values.map((value, i) => method(keys[i], value)));
 	}
 
 	module.sortedSetRanks = async function (key, values) {
@@ -262,6 +294,14 @@ module.exports = function (module) {
 		return await sortedSetRanks(true, key, values);
 	};
 
+	/**
+	 * Resolves the rank of every value in a single set. A single value is looked
+	 * up directly; several values are ranked against one fetched copy of the set.
+	 * @param {boolean} reverse rank in descending order
+	 * @param {string} key
+	 * @param {Array<string|number>} values
+	 * @returns {Promise<Array<number|null|undefined>>}
+	 */
 	async function sortedSetRanks(reverse, key, values) {
 		if (values.length === 1) {
 			return [await getSortedSetRank(reverse, key, values[0])];
@@ -282,7 +322,7 @@ module.exports = function (module) {
 		}
 		value = helpers.valueToString(value);
 		const result = await module.client.collection('objects').findOne(
-			{ _key: key, value: value },
+			{ _key: key, value },
 			{
 				projection: { _id: 0, _key: 0, value: 0 },
 				hint: hintKeyValue,
@@ -297,7 +337,7 @@ module.exports = function (module) {
 		}
 		value = helpers.valueToString(value);
 		const result = await module.client.collection('objects').find(
-			{ _key: { $in: keys }, value: value },
+			{ _key: { $in: keys }, value },
 			{
 				projection: { _id: 0, value: 0 },
 				hint: hintKeyValue,
@@ -340,7 +380,7 @@ module.exports = function (module) {
 		}
 		value = helpers.valueToString(value);
 		const result = await module.client.collection('objects').findOne({
-			_key: key, value: value,
+			_key: key, value,
 		}, {
 			projection: { _id: 0, value: 1 },
 			hint: hintKeyValue,
@@ -373,7 +413,7 @@ module.exports = function (module) {
 		}
 		value = helpers.valueToString(value);
 		const results = await module.client.collection('objects').find({
-			_key: { $in: keys }, value: value,
+			_key: { $in: keys }, value,
 		}, {
 			projection: { _id: 0, _key: 1, value: 1 },
 			hint: hintKeyValue,
@@ -401,13 +441,19 @@ module.exports = function (module) {
 		return await getSortedSetsMembersWithScores(keys, true);
 	};
 
+	/**
+	 * Fetches members (and optionally scores) for one or many sets, sorted by score.
+	 * @param {string[]} keys
+	 * @param {boolean} withScores whether to return `{ value, score }` objects
+	 * @returns {Promise<Array>} one entry per key, each an array of members
+	 */
 	async function getSortedSetsMembersWithScores(keys, withScores) {
 		if (!Array.isArray(keys) || !keys.length) {
 			return [];
 		}
 		const arrayOfKeys = keys.length > 1;
 		const projection = arrayOfKeys ?
-			{ _id: 0, _key: 1, value: 1} :
+			{ _id: 0, _key: 1, value: 1 } :
 			{ _id: 0, value: 1 };
 		if (withScores) {
 			projection.score = 1;
@@ -415,7 +461,7 @@ module.exports = function (module) {
 
 		const data = await module.client.collection('objects').find({
 			_key: arrayOfKeys ? { $in: keys } : keys[0],
-		}, { projection: projection })
+		}, { projection })
 			.sort({ score: 1 })
 			.hint(hintKeyScore)
 			.toArray();
@@ -443,16 +489,14 @@ module.exports = function (module) {
 		if (!key) {
 			return;
 		}
-		const data = {};
 		value = helpers.valueToString(value);
-		data.score = parseFloat(increment);
 
 		try {
 			const result = await module.client.collection('objects').findOneAndUpdate({
 				_key: key,
-				value: value,
+				value,
 			}, {
-				$inc: data,
+				$inc: { score: parseFloat(increment) },
 			}, {
 				returnDocument: 'after',
 				includeResultMetadata: true,
@@ -464,7 +508,7 @@ module.exports = function (module) {
 			// if there is duplicate key error retry the upsert
 			// https://github.com/NodeBB/NodeBB/issues/4467
 			// https://jira.mongodb.org/browse/SERVER-14322
-			// https://docs.mongodb.org/manual/reference/command/findAndModify/#upsert-and-unique-index
+			// https://docs.mongodb.com/manual/reference/command/findAndModify/#upsert-and-unique-index
 			if (err && err.message.includes('E11000 duplicate key error')) {
 				console.log(new Error('e11000').stack, key, increment, value);
 				return await module.sortedSetIncrBy(key, increment, value);
@@ -481,7 +525,7 @@ module.exports = function (module) {
 		const findQuery = { $or: [] };
 
 		const operations = aggregated.map(([key, incr, value]) => {
-			const query = { _key: key, value: value };
+			const query = { _key: key, value };
 			findQuery.$or.push(query);
 			return {
 				updateOne: {
@@ -539,6 +583,16 @@ module.exports = function (module) {
 		return data ? data.length : null;
 	};
 
+	/**
+	 * Shared implementation of the lexicographic range getters.
+	 * @param {string} key
+	 * @param {string} min redis-style lower bound ('-', '[value', '(value')
+	 * @param {string} max redis-style upper bound ('+', '[value', '(value')
+	 * @param {number} sort 1 for ascending, -1 for descending
+	 * @param {number} start
+	 * @param {number} count -1 for no limit
+	 * @returns {Promise<string[]>}
+	 */
 	async function sortedSetLex(key, min, max, sort, start, count) {
 		const query = { _key: key };
 		start = start !== undefined ? start : 0;
@@ -565,11 +619,17 @@ module.exports = function (module) {
 		});
 	};
 
+	/**
+	 * Translates redis-style lex bounds into a mongo `value` condition on `query`.
+	 * @param {object} query filter to extend
+	 * @param {string} min lower bound
+	 * @param {string} max upper bound
+	 */
 	function buildLexQuery(query, min, max) {
 		if (min !== '-') {
-			if (min.match(/^\(/)) {
+			if (min.startsWith('(')) {
 				query.value = { $gt: min.slice(1) };
-			} else if (min.match(/^\[/)) {
+			} else if (min.startsWith('[')) {
 				query.value = { $gte: min.slice(1) };
 			} else {
 				query.value = { $gte: min };
@@ -577,9 +637,9 @@ module.exports = function (module) {
 		}
 		if (max !== '+') {
 			query.value = query.value || {};
-			if (max.match(/^\(/)) {
+			if (max.startsWith('(')) {
 				query.value.$lt = max.slice(1);
-			} else if (max.match(/^\[/)) {
+			} else if (max.startsWith('[')) {
 				query.value.$lte = max.slice(1);
 			} else {
 				query.value.$lte = max;
@@ -597,7 +657,7 @@ module.exports = function (module) {
 		let regex;
 		try {
 			regex = new RegExp(match);
-		} catch (err) {
+		} catch {
 			return [];
 		}
 
