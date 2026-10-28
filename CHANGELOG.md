@@ -15198,7 +15198,7 @@
 *  change to const/let (3454a24b)
 *  shorter returns (cec00795)
 
-### 1.13.0 (2019-11-13)
+#### 1.13.0 (2019-11-13)
 
 ##### Chores
 
@@ -15994,7 +15994,7 @@
   *  update dependency nodebb-theme-persona to v9.1.25 (#7436) (9887bb4f)
   *  update dependency nodebb-plugin-composer-default to v6.2.8 (#7435) (c18f2e1f)
 
-### 1.12.0 (2019-03-06)
+#### 1.12.0 (2019-03-06)
 
 ##### Chores
 
@@ -16538,7 +16538,7 @@
 
 * **eslint:**  match operator-linebreak preferences (ba619c7e)
 
-### 1.11.0 (2018-11-28)
+#### 1.11.0 (2018-11-28)
 
 ##### Chores
 
