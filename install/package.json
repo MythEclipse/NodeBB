@@ -173,6 +173,7 @@
         "@stylistic/eslint-plugin": "5.10.0",
         "ajv": "8.20.0",
         "coveralls-next": "6.0.2",
+        "eslint": "10.13.0",
         "eslint-config-nodebb": "2.0.3",
         "globals": "17.12.0",
         "grunt": "1.6.3",
