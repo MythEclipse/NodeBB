@@ -20,6 +20,20 @@ const sockets = require('../socket.io');
 
 const authenticationController = module.exports;
 
+/**
+ * Creates (or queues) the user described by `userData` and, when enabled, logs them in.
+ *
+ * `userData` is mutated in place: a client-supplied `uid` is discarded and replaced with
+ * the session's own uid (if any), so a registration attempt can never be replayed against
+ * another account (e.g. clearing someone else's email through the email interstitial).
+ *
+ * @param {object} req Express request object
+ * @param {object} res Express response object
+ * @param {object} userData Registration payload, taken from the request body or the
+ *   registration attempt parked in the session
+ * @returns {Promise<object|undefined>} Result of the `filter:register.complete` hook, a
+ *   pending-registration message, or nothing when the request was answered directly
+ */
 async function registerAndLoginUser(req, res, userData) {
 	// Never trust a client-supplied uid; only the session's own uid is valid
 	if (req.uid) {
@@ -28,7 +42,8 @@ async function registerAndLoginUser(req, res, userData) {
 		delete userData.uid;
 	}
 
-	if (!userData.hasOwnProperty('email')) {
+	// Without an email in the payload the user still has to supply one via the interstitial
+	if (!Object.hasOwn(userData, 'email')) {
 		userData.updateEmail = true;
 	}
 

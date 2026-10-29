@@ -647,11 +647,11 @@ describe('authentication', () => {
 			};
 		}
 
-		async function parkRegistration(username) {
+		async function parkRegistration(username, extraBody = {}) {
 			const jar = request.jar();
 			const { response, body } = await helpers.request('post', '/register', {
 				jar,
-				body: registrationBody(username),
+				body: { ...registrationBody(username), ...extraBody },
 			});
 			assert.strictEqual(response.status, 200);
 			assert.strictEqual(body.next, `${nconf.get('relative_path')}/register/complete`);
@@ -659,10 +659,11 @@ describe('authentication', () => {
 			return jar;
 		}
 
-		async function completeRegistration(jar) {
+		async function completeRegistration(jar, extraFormData = {}) {
 			const formData = new FormData();
 			formData.append('gdpr_agree_data', 'on');
 			formData.append('gdpr_agree_email', 'on');
+			Object.entries(extraFormData).forEach(([key, value]) => formData.append(key, value));
 			return await helpers.request('post', '/register/complete', {
 				jar,
 				body: formData,
@@ -704,45 +705,28 @@ describe('authentication', () => {
 		});
 
 		it('should ignore a client-supplied uid in the registration body', async () => {
+			const previousRequireEmailAddress = meta.config.requireEmailAddress;
 			meta.config.requireEmailAddress = 0;
 
-			// Victim: an account with a confirmed email and no password (e.g. SSO-created)
-			const suffix = utils.generateUUID().slice(0, 8);
-			const victimUid = await user.create({
-				username: `victim${suffix}`,
-				email: `victim${suffix}@example.org`,
-			}, { emailVerification: 'verify' });
+			try {
+				// Victim: an account with a confirmed email and no password (e.g. SSO-created)
+				const suffix = utils.generateUUID().slice(0, 8);
+				const victimUid = await user.create({
+					username: `victim${suffix}`,
+					email: `victim${suffix}@example.org`,
+				}, { emailVerification: 'verify' });
 
-			const username = `mallory${suffix}`;
-			const jar = request.jar();
-			const { response, body } = await helpers.request('post', '/register', {
-				jar,
-				body: {
-					username,
-					password: 'pending-registration-password',
-					'password-confirm': 'pending-registration-password',
-					uid: victimUid,
-				},
-			});
-			assert.strictEqual(response.status, 200);
-			assert.strictEqual(body.next, `${nconf.get('relative_path')}/register/complete`);
+				// Register with the victim's uid in the body, then try to clear their email
+				const jar = await parkRegistration(`mallory${suffix}`, { uid: victimUid });
+				const { response } = await completeRegistration(jar, { email: '' });
+				assert.strictEqual(response.status, 302);
 
-			const formData = new FormData();
-			formData.append('email', '');
-			formData.append('gdpr_agree_data', 'on');
-			formData.append('gdpr_agree_email', 'on');
-			const { response: res2 } = await helpers.request('post', '/register/complete', {
-				jar,
-				body: formData,
-				redirect: 'manual',
-			});
-			assert.strictEqual(res2.status, 302);
-
-			const victimData = await user.getUserFields(victimUid, ['email', 'email:confirmed']);
-			assert.strictEqual(victimData.email, `victim${suffix}@example.org`);
-			assert.strictEqual(victimData['email:confirmed'], 1);
-
-			meta.config.requireEmailAddress = 1;
+				const victimData = await user.getUserFields(victimUid, ['email', 'email:confirmed']);
+				assert.strictEqual(victimData.email, `victim${suffix}@example.org`);
+				assert.strictEqual(victimData['email:confirmed'], 1);
+			} finally {
+				meta.config.requireEmailAddress = previousRequireEmailAddress;
+			}
 		});
 	});
 

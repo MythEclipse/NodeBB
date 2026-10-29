@@ -120,10 +120,12 @@ Interstitials.email = async (data) => {
 					}
 
 					if (current.length) {
+						// Clearing an email is only ever allowed by the account owner
 						if (!isSelf) {
 							throw new Error('[[error:no-privileges]]');
 						}
 
+						// A password (if one is set) is required to clear the email
 						if (!hasPassword || isPasswordCorrect) {
 							// User explicitly clearing their email
 							await user.email.remove(userData.uid, data.req.session.id);
