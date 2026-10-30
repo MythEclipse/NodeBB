@@ -16,11 +16,19 @@ const posts = require('../src/posts');
 const user = require('../src/user');
 const groups = require('../src/groups');
 const meta = require('../src/meta');
-const translator = require('../src/translator');
 const privileges = require('../src/privileges');
 const plugins = require('../src/plugins');
 const utils = require('../src/utils');
 const slugify = require('../src/slugify');
+const widgets = require('../src/widgets');
+const notifications = require('../src/notifications');
+const navigationAdmin = require('../src/navigation/admin');
+const navigationData = require('../install/data/navigation.json');
+const editController = require('../src/controllers/accounts/edit');
+const socketUser = require('../src/socket.io/user');
+const apiUser = require('../src/api/users');
+const controllerHelpers = require('../src/controllers/helpers');
+const analytics = require('../src/analytics');
 const helpers = require('./helpers');
 
 const sleep = util.promisify(setTimeout);
@@ -47,12 +55,9 @@ describe('Controllers', () => {
 		adminUid = await user.create({ username: 'admin', password: 'barbar', gdpr_consent: true });
 		await groups.join('administrators', adminUid);
 
-		const navigation = require('../src/navigation/admin');
-		const data = require('../install/data/navigation.json');
+		await navigationAdmin.save(navigationData);
 
-		await navigation.save(data);
-
-		const result = await topics.post({ uid: fooUid, title: 'test topic title', content: 'test topic content', cid: cid });
+		const result = await topics.post({ uid: fooUid, title: 'test topic title', content: 'test topic content', cid });
 		tid = result.topicData.tid;
 
 		pid = result.postData.pid;
@@ -303,7 +308,7 @@ describe('Controllers', () => {
 		assert.strictEqual(body.next, `${nconf.get('relative_path')}/register/complete`);
 
 		const { response: res2, body: body2 } = await request.get(`${nconf.get('url')}/api/register/complete`, {
-			jar: jar,
+			jar,
 			json: true,
 		});
 		assert.equal(res2.statusCode, 200);
@@ -376,19 +381,17 @@ describe('Controllers', () => {
 			});
 
 			it('should error if userData is falsy', async () => {
-				try {
-					await user.interstitials.email({ userData: null });
-					assert(false);
-				} catch (err) {
-					assert.strictEqual(err.message, '[[error:invalid-data]]');
-				}
+				await assert.rejects(
+					user.interstitials.email({ userData: null }),
+					{ message: '[[error:invalid-data]]' }
+				);
 			});
 
 			it('should throw error if email is not valid', async () => {
 				const uid = await user.create({ username: 'interstiuser1' });
 				const result = await user.interstitials.email({
-					userData: { uid: uid, updateEmail: true },
-					req: { uid: uid },
+					userData: { uid, updateEmail: true },
+					req: { uid },
 					interstitials: [],
 				});
 				assert.strictEqual(result.interstitials[0].template, 'partials/email_update');
@@ -400,8 +403,8 @@ describe('Controllers', () => {
 			it('should reject an email that comprises only whitespace', async () => {
 				const uid = await user.create({ username: utils.generateUUID().slice(0, 10) });
 				const result = await user.interstitials.email({
-					userData: { uid: uid, updateEmail: true },
-					req: { uid: uid },
+					userData: { uid, updateEmail: true },
+					req: { uid },
 					interstitials: [],
 				});
 				assert.strictEqual(result.interstitials[0].template, 'partials/email_update');
@@ -413,12 +416,12 @@ describe('Controllers', () => {
 			it('should set req.session.emailChanged to 1', async () => {
 				const uid = await user.create({ username: 'interstiuser2' });
 				const result = await user.interstitials.email({
-					userData: { uid: uid, updateEmail: true },
-					req: { uid: uid, session: {} },
+					userData: { uid, updateEmail: true },
+					req: { uid, session: {} },
 					interstitials: [],
 				});
 
-				await result.interstitials[0].callback({ uid: uid }, {
+				await result.interstitials[0].callback({ uid }, {
 					email: 'interstiuser2@nodebb.org',
 				});
 				assert.strictEqual(result.req.session.emailChanged, 1);
@@ -426,20 +429,18 @@ describe('Controllers', () => {
 
 			it('should throw error if user tries to edit other users email', async () => {
 				const uid = await user.create({ username: 'interstiuser4' });
-				try {
-					const result = await user.interstitials.email({
-						userData: { uid: uid, updateEmail: true },
-						req: { uid: 1000 },
-						interstitials: [],
-					});
+				const result = await user.interstitials.email({
+					userData: { uid, updateEmail: true },
+					req: { uid: 1000 },
+					interstitials: [],
+				});
 
-					await result.interstitials[0].callback({ uid: uid }, {
+				await assert.rejects(
+					result.interstitials[0].callback({ uid }, {
 						email: 'derp@derp.com',
-					});
-					assert(false);
-				} catch (err) {
-					assert.strictEqual(err.message, '[[error:no-privileges]]');
-				}
+					}),
+					{ message: '[[error:no-privileges]]' }
+				);
 			});
 
 			it('should remove current email (only allowed if email not required)', async () => {
@@ -450,12 +451,12 @@ describe('Controllers', () => {
 				}, { emailVerification: 'verify' });
 
 				const result = await user.interstitials.email({
-					userData: { uid: uid, updateEmail: true },
-					req: { uid: uid, session: { id: 0 } },
+					userData: { uid, updateEmail: true },
+					req: { uid, session: { id: 0 } },
 					interstitials: [],
 				});
 
-				await result.interstitials[0].callback({ uid: uid }, {
+				await result.interstitials[0].callback({ uid }, {
 					email: '',
 				});
 				const userData = await user.getUserData(uid);
@@ -476,7 +477,7 @@ describe('Controllers', () => {
 					}, { emailVerification: 'verify' });
 
 					const result = await user.interstitials.email({
-						userData: { uid: uid, updateEmail: true },
+						userData: { uid, updateEmail: true },
 						req: { uid: 0, session: { id: 0 } },
 						interstitials: [],
 					});
@@ -494,26 +495,25 @@ describe('Controllers', () => {
 			});
 
 			it('should require a password (if one is set) for email change', async () => {
-				try {
-					const [username, password] = [utils.generateUUID().slice(0, 10), utils.generateUUID()];
-					const uid = await user.create({
-						username, password, email: `${username}@nodebb.org`,
-					}, {
-						emailVerification: 'verify',
-					});
+				const [username, password] = [utils.generateUUID().slice(0, 10), utils.generateUUID()];
+				const uid = await user.create({
+					username, password, email: `${username}@nodebb.org`,
+				}, {
+					emailVerification: 'verify',
+				});
 
-					const result = await user.interstitials.email({
-						userData: { uid: uid, updateEmail: true },
-						req: { uid: uid, session: { id: 0 } },
-						interstitials: [],
-					});
+				const result = await user.interstitials.email({
+					userData: { uid, updateEmail: true },
+					req: { uid, session: { id: 0 } },
+					interstitials: [],
+				});
 
-					await result.interstitials[0].callback({ uid: uid }, {
+				await assert.rejects(
+					result.interstitials[0].callback({ uid }, {
 						email: `${username}@nodebb.com`,
-					});
-				} catch (err) {
-					assert.strictEqual(err.message, '[[error:invalid-password]]');
-				}
+					}),
+					{ message: '[[error:invalid-password]]' }
+				);
 			});
 
 			it('should require a password (if one is set) for email clearing', async () => {
@@ -528,19 +528,20 @@ describe('Controllers', () => {
 					});
 
 					const result = await user.interstitials.email({
-						userData: { uid: uid, updateEmail: true },
-						req: { uid: uid, session: { id: 0 } },
+						userData: { uid, updateEmail: true },
+						req: { uid, session: { id: 0 } },
 						interstitials: [],
 					});
 
-					await result.interstitials[0].callback({ uid: uid }, {
-						email: '',
-					});
-				} catch (err) {
-					assert.strictEqual(err.message, '[[error:invalid-password]]');
+					await assert.rejects(
+						result.interstitials[0].callback({ uid }, {
+							email: '',
+						}),
+						{ message: '[[error:invalid-password]]' }
+					);
+				} finally {
+					meta.config.requireEmailAddress = 1;
 				}
-
-				meta.config.requireEmailAddress = 1;
 			});
 
 			it('should successfully issue validation request if the correct password is passed in', async () => {
@@ -552,8 +553,8 @@ describe('Controllers', () => {
 				});
 
 				const result = await user.interstitials.email({
-					userData: { uid: uid, updateEmail: true },
-					req: { uid: uid, session: { id: 0 } },
+					userData: { uid, updateEmail: true },
+					req: { uid, session: { id: 0 } },
 					interstitials: [],
 				});
 
@@ -578,8 +579,8 @@ describe('Controllers', () => {
 
 				async function getCallback(uid) {
 					const result = await user.interstitials.email({
-						userData: { uid: uid, updateEmail: true },
-						req: { uid: uid, session: { id: 0 } },
+						userData: { uid, updateEmail: true },
+						req: { uid, session: { id: 0 } },
 						interstitials: [],
 					});
 					return result.interstitials[0].callback;
@@ -643,7 +644,7 @@ describe('Controllers', () => {
 					meta.config['email:disableEdit'] = 1;
 
 					const result = await user.interstitials.email({
-						userData: { uid: uid, updateEmail: true },
+						userData: { uid, updateEmail: true },
 						req: { uid: adminUid, session: { id: 0 } },
 						interstitials: [],
 					});
@@ -838,8 +839,8 @@ describe('Controllers', () => {
 						'x-csrf-token': token,
 					},
 					body: {
-						username: username,
-						password: password,
+						username,
+						password,
 					},
 				});
 				// Start email change flow, this sets req.session.registration.updateEmail = true
@@ -918,7 +919,7 @@ describe('Controllers', () => {
 			uid: fooUid,
 			title: 'topic title',
 			content: 'test topic content',
-			cid: cid,
+			cid,
 		});
 
 		const { response, body } = await request.get(`${nconf.get('url')}/api/groups/group-details`);
@@ -934,7 +935,6 @@ describe('Controllers', () => {
 	});
 
 	it('should 404 when trying to load group members of hidden group', async () => {
-		const groups = require('../src/groups');
 		await groups.create({
 			name: 'hidden-group',
 			description: 'Foobar!',
@@ -960,7 +960,7 @@ describe('Controllers', () => {
 
 		it('should fail to revoke session with missing uuid', async () => {
 			const { response } = await request.del(`${nconf.get('url')}/api/user/revokeme/session`, {
-				jar: jar,
+				jar,
 				headers: {
 					'x-csrf-token': csrf_token,
 				},
@@ -970,7 +970,7 @@ describe('Controllers', () => {
 
 		it('should fail if user doesn\'t exist', async () => {
 			const { response, body } = await request.del(`${nconf.get('url')}/api/v3/users/doesnotexist/sessions/1112233`, {
-				jar: jar,
+				jar,
 				headers: {
 					'x-csrf-token': csrf_token,
 				},
@@ -991,7 +991,7 @@ describe('Controllers', () => {
 			const sessionObj = await db.sessionStoreGet(sid);
 
 			const { response, body } = await request.del(`${nconf.get('url')}/api/v3/users/${uid}/sessions/${sessionObj.meta.uuid}`, {
-				jar: jar,
+				jar,
 				headers: {
 					'x-csrf-token': csrf_token,
 				},
@@ -1009,8 +1009,6 @@ describe('Controllers', () => {
 	});
 
 	describe('widgets', () => {
-		const widgets = require('../src/widgets');
-
 		before(async () => {
 			await widgets.reset();
 			const data = {
@@ -1062,7 +1060,7 @@ describe('Controllers', () => {
 				uid: fooUid,
 				title: 'topic title',
 				content: 'test topic content',
-				cid: cid,
+				cid,
 				tags: ['nodebb', 'bug', 'test'],
 			});
 		});
@@ -1320,26 +1318,25 @@ describe('Controllers', () => {
 			});
 
 			it('should export users posts', async () => {
-				const { response, body } = await request.get(`${nconf.get('url')}/api/v3/users/${fooUid}/exports/posts`, { jar: jar });
+				const { response, body } = await request.get(`${nconf.get('url')}/api/v3/users/${fooUid}/exports/posts`, { jar });
 				assert.equal(response.statusCode, 200);
 				assert(body);
 			});
 
 			it('should export users uploads', async () => {
-				const { response, body } = await request.get(`${nconf.get('url')}/api/v3/users/${fooUid}/exports/uploads`, { jar: jar });
+				const { response, body } = await request.get(`${nconf.get('url')}/api/v3/users/${fooUid}/exports/uploads`, { jar });
 				assert.equal(response.statusCode, 200);
 				assert(body);
 			});
 
 			it('should export users profile', async () => {
-				const { response, body } = await request.get(`${nconf.get('url')}/api/v3/users/${fooUid}/exports/profile`, { jar: jar });
+				const { response, body } = await request.get(`${nconf.get('url')}/api/v3/users/${fooUid}/exports/profile`, { jar });
 				assert.equal(response.statusCode, 200);
 				assert(body);
 			});
 		});
 
 		it('should load notifications page', async () => {
-			const notifications = require('../src/notifications');
 			const notifData = {
 				bodyShort: '[[notifications:user-posted-to, test1, test2]]',
 				bodyLong: 'some post content',
@@ -1424,12 +1421,12 @@ describe('Controllers', () => {
 		});
 
 		it('should load correct user', async () => {
-			const { response } = await request.get(`${nconf.get('url')}/api/user/FOO`, { jar: jar });
+			const { response } = await request.get(`${nconf.get('url')}/api/user/FOO`, { jar });
 			assert.equal(response.statusCode, 200);
 		});
 
 		it('should redirect', async () => {
-			const { response, body } = await request.get(`${nconf.get('url')}/user/FOO`, { jar: jar });
+			const { response, body } = await request.get(`${nconf.get('url')}/user/FOO`, { jar });
 			assert.equal(response.statusCode, 200);
 			assert(body);
 		});
@@ -1492,7 +1489,7 @@ describe('Controllers', () => {
 		});
 
 		it('should only return posts that are not deleted', async () => {
-			const { topicData } = await topics.post({ uid: fooUid, title: 'visible', content: 'some content', cid: cid });
+			const { topicData } = await topics.post({ uid: fooUid, title: 'visible', content: 'some content', cid });
 			const { pid: pidToDelete } = await topics.reply({ uid: fooUid, content: '1st reply', tid: topicData.tid });
 			await topics.reply({ uid: fooUid, content: '2nd reply', tid: topicData.tid });
 			await posts.delete(pidToDelete, fooUid);
@@ -1550,7 +1547,6 @@ describe('Controllers', () => {
 
 		it('should not render edit/email if email:disableEdit is enabled', async () => {
 			// The route sits behind requirePageReAuth, so the controller is called directly here
-			const editController = require('../src/controllers/accounts/edit');
 			meta.config['email:disableEdit'] = 1;
 
 			let statusCode;
@@ -1584,13 +1580,11 @@ describe('Controllers', () => {
 	});
 
 	describe('account follow page', () => {
-		const socketUser = require('../src/socket.io/user');
-		const apiUser = require('../src/api/users');
 		let uid;
 		before(async () => {
 			uid = await user.create({ username: 'follower' });
-			await apiUser.follow({ uid: uid }, { uid: fooUid });
-			const isFollowing = await socketUser.isFollowing({ uid: uid }, { uid: fooUid });
+			await apiUser.follow({ uid }, { uid: fooUid });
+			const isFollowing = await socketUser.isFollowing({ uid }, { uid: fooUid });
 			assert(isFollowing);
 		});
 
@@ -1607,7 +1601,7 @@ describe('Controllers', () => {
 		});
 
 		it('should return empty after unfollow', async () => {
-			await apiUser.unfollow({ uid: uid }, { uid: fooUid });
+			await apiUser.unfollow({ uid }, { uid: fooUid });
 			const { response, body } = await request.get(`${nconf.get('url')}/api/user/foo/followers`);
 			assert.equal(response.statusCode, 200);
 			assert.equal(body.users.length, 0);
@@ -1659,7 +1653,6 @@ describe('Controllers', () => {
 	});
 
 	describe('handle errors', () => {
-		const plugins = require('../src/plugins');
 		after(() => {
 			delete plugins.loadedHooks['response:router.page'];
 		});
@@ -1891,23 +1884,20 @@ describe('Controllers', () => {
 		});
 
 		it('should load categories', async () => {
-			const helpers = require('../src/controllers/helpers');
-			const data = await helpers.getCategories('cid:0:children', 1, 'topics:read', 0);
+			const data = await controllerHelpers.getCategories('cid:0:children', 1, 'topics:read', 0);
 			assert(data.categories.length > 0);
 			assert.strictEqual(data.selectedCategory, null);
 			assert.deepStrictEqual(data.selectedCids, []);
 		});
 
 		it('should load categories by states', async () => {
-			const helpers = require('../src/controllers/helpers');
-			const data = await helpers.getCategoriesByStates(1, 1, Object.values(categories.watchStates), 'topics:read');
+			const data = await controllerHelpers.getCategoriesByStates(1, 1, Object.values(categories.watchStates), 'topics:read');
 			assert.deepStrictEqual(data.selectedCategory.cid, 1);
 			assert.deepStrictEqual(data.selectedCids, [1]);
 		});
 
 		it('should load categories by states', async () => {
-			const helpers = require('../src/controllers/helpers');
-			const data = await helpers.getCategoriesByStates(1, 0, [categories.watchStates.ignoring], 'topics:read');
+			const data = await controllerHelpers.getCategoriesByStates(1, 0, [categories.watchStates.ignoring], 'topics:read');
 			assert(data.categories.length === 0);
 			assert.deepStrictEqual(data.selectedCategory, null);
 			assert.deepStrictEqual(data.selectedCids, []);
@@ -2004,7 +1994,7 @@ describe('Controllers', () => {
 				data: {
 					content: 'a new reply',
 				},
-				jar: jar,
+				jar,
 				headers: {
 					'x-csrf-token': csrf_token,
 				},
@@ -2013,9 +2003,9 @@ describe('Controllers', () => {
 			assert.equal(result.response.statusCode, 400);
 			result = await request.post(`${nconf.get('url')}/compose`, {
 				body: {
-					tid: tid,
+					tid,
 				},
-				jar: jar,
+				jar,
 				headers: {
 					'x-csrf-token': csrf_token,
 				},
@@ -2026,11 +2016,11 @@ describe('Controllers', () => {
 		it('should create a new topic and reply by composer route', async () => {
 			let result = await request.post(`${nconf.get('url')}/compose`, {
 				body: {
-					cid: cid,
+					cid,
 					title: 'no js is good',
 					content: 'a topic with noscript',
 				},
-				jar: jar,
+				jar,
 				maxRedirect: 0,
 				redirect: 'manual',
 				headers: {
@@ -2041,10 +2031,10 @@ describe('Controllers', () => {
 			assert.equal(result.response.statusCode, 302);
 			result = await request.post(`${nconf.get('url')}/compose`, {
 				body: {
-					tid: tid,
+					tid,
 					content: 'a new reply',
 				},
-				jar: jar,
+				jar,
 				maxRedirect: 0,
 				redirect: 'manual',
 				headers: {
@@ -2062,7 +2052,7 @@ describe('Controllers', () => {
 
 			const result = await helpers.request('post', `/compose`, {
 				body: {
-					cid: cid,
+					cid,
 					title: 'no js is good',
 					content: 'a topic with noscript',
 					handle: 'guest1',
@@ -2078,7 +2068,7 @@ describe('Controllers', () => {
 
 			const replyResult = await helpers.request('post', `/compose`, {
 				body: {
-					tid: tid,
+					tid,
 					content: 'a new reply',
 					handle: 'guest2',
 				},
@@ -2099,7 +2089,7 @@ describe('Controllers', () => {
 				description: 'private',
 			});
 
-			const result = await topics.post({ uid: fooUid, title: 'hidden title', content: 'hidden content', cid: cid });
+			const result = await topics.post({ uid: fooUid, title: 'hidden title', content: 'hidden content', cid });
 
 			await privileges.categories.rescind(['groups:topics:read'], category.cid, 'guests');
 			let { response, body } = await request.get(`${nconf.get('url')}/api/compose?tid=${result.topicData.tid}`);
@@ -2189,8 +2179,7 @@ describe('Controllers', () => {
 		});
 	});
 
-	describe('controllers helpers' , () => {
-		const controllerHelpers = require('../src/controllers/helpers');
+	describe('controllers helpers', () => {
 		it('should filter cids with no find privilege', async () => {
 			const category1 = await categories.create({ name: 'category1' });
 			const category2 = await categories.create({ name: 'category2' });
@@ -2229,7 +2218,6 @@ describe('Controllers', () => {
 	});
 
 	after((done) => {
-		const analytics = require('../src/analytics');
 		analytics.writeData(done);
 	});
 });
