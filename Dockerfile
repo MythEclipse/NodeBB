@@ -1,4 +1,4 @@
-FROM node:lts as build
+FROM node:lts AS build
 
 ENV NODE_ENV=production \
     DAEMON=false \
@@ -14,13 +14,14 @@ COPY . /usr/src/app/
 # Removing unnecessary files for us
 RUN find . -mindepth 1 -maxdepth 1 -name '.*' ! -name '.' ! -name '..' -exec bash -c 'echo "Deleting {}"; rm -rf {}' \;
 
-# Prepage package.json
+# Prepare package.json
 RUN cp /usr/src/app/install/package.json /usr/src/app/
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive \
     apt-get -y --no-install-recommends install \
-        tini
+        tini \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid ${GID} ${USER} \
     && useradd --uid ${UID} --gid ${GID} --home-dir /usr/src/app/ --shell /bin/bash ${USER} \
@@ -30,8 +31,9 @@ USER ${USER}
 
 RUN npm install --omit=dev \
     && rm -rf .npm
-    # TODO: generate lockfiles for each package manager
-    ## pnpm import \
+
+# TODO: generate lockfiles for each package manager
+# pnpm import
 
 FROM node:lts-slim AS final
 
@@ -55,8 +57,7 @@ RUN npm install --global corepack \
 COPY --from=build --chown=${USER}:${USER} /usr/src/app/ /usr/src/app/install/docker/setup.json /usr/src/app/
 COPY --from=build --chown=${USER}:${USER} /usr/bin/tini /usr/src/app/install/docker/entrypoint.sh /usr/local/bin/
 
-RUN chmod +x /usr/local/bin/entrypoint.sh \
-    && chmod +x /usr/local/bin/tini
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/tini
 
 # TODO: Have docker-compose use environment variables to create files like setup.json and config.json.
 # COPY --from=hairyhenderson/gomplate:stable /gomplate /usr/local/bin/gomplate
