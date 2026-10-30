@@ -212,6 +212,15 @@ ajaxify.widgets = { render: render };
 		}
 	};
 
+	/**
+	 * Returns `href` when it is a safe navigation target, otherwise the site
+	 * root. Protects against `javascript:`/`data:` URLs and protocol-relative
+	 * (`//host`) redirects supplied by the server.
+	 */
+	function getSafeRedirectHref(href) {
+		return utils.isSafeHref(href) ? href : `${config.relative_path}/`;
+	}
+
 	function onAjaxError(err, url, callback, quiet) {
 		const data = err.data;
 		const textStatus = err.textStatus;
@@ -242,13 +251,11 @@ ajaxify.widgets = { render: render };
 				if (data.responseJSON && data.responseJSON.external) {
 					// this is used by sso plugins to redirect to the auth route
 					// cant use ajaxify.go for /auth/sso routes
-					window.location.href = utils.isSafeHref(data.responseJSON.external) ?
-						data.responseJSON.external : config.relative_path + '/';
+					window.location.href = getSafeRedirectHref(data.responseJSON.external);
 				} else if (typeof data.responseJSON === 'string') {
 					ajaxifyTimer = undefined;
-					const targetHref = utils.isSafeHref(data.responseJSON) ?
-						data.responseJSON : config.relative_path + '/';
-					if (data.responseJSON.startsWith('http://') || data.responseJSON.startsWith('https://')) {
+					const targetHref = getSafeRedirectHref(data.responseJSON);
+					if (targetHref.startsWith('http://') || targetHref.startsWith('https://')) {
 						window.location.href = targetHref;
 					} else {
 						ajaxify.go(targetHref.slice(1), callback, quiet);
